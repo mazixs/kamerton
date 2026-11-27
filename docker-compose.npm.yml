@@ -5,7 +5,7 @@ services:
   kamerton:
     build:
       context: ${KAMERTON_BUILD_CONTEXT:-.}
-      target: standard
+      target: ${KAMERTON_BUILD_TARGET:-standard}
       args:
         GIGASTT_TAG: ${GIGASTT_TAG:-2.22.0}
     image: ${KAMERTON_IMAGE:-kamerton:npm}

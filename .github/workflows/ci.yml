@@ -51,8 +51,8 @@ jobs:
         with:
           version: '0.13.4'
           python-version: '3.13'
-      - name: Build the default application image
-        run: docker build --tag kamerton:ci .
+      - name: Build the application image used by the installer
+        run: docker build --target app --tag kamerton:ci .
       - name: Test installation against Docker
         env:
           KAMERTON_INSTALL_TEST_IMAGE: kamerton:ci

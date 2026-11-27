@@ -77,8 +77,9 @@ class Supervisor:
         self._start_kind = "other"
         self._lock = asyncio.Lock()
         self._inference_users = 0
-        self._inference_idle = asyncio.Event()
-        self._inference_idle.set()
+        self._inference_drained_or_stopping = asyncio.Event()
+        self._inference_drained_or_stopping.set()
+        self._stop_requests = 0
         self._request_model: EngineConfig | None = None
         self._comparison_task: asyncio.Task[Any] | None = None
         self._native_reload_task: asyncio.Task[Any] | None = None
@@ -172,6 +173,7 @@ class Supervisor:
             raise ApiError(404, "Веса модели или ее движок недоступны на сервере.",
                            "model_not_available", param="model")
         async with self._lock:
+            self._require_inference_access()
             current = self.current
             switching = variant is not None and (current is None or current.variant != variant)
             if switching:
@@ -180,13 +182,12 @@ class Supervisor:
                 ):
                     raise ApiError(409, "Движок обслуживает локальную очередь заданий. "
                                    "Для смены модели используйте консоль.", "model_switch_jobs_enabled", param="model")
-                await self._inference_idle.wait()
+                await self._drain_inference()
                 if (task := self._comparison_task) is not None:
                     await asyncio.wait({task})
             if before_use is not None:
                 await before_use()
-            if self._shutting_down:
-                raise ApiError(503, "Сервис останавливается.", "engine_not_ready", "server_error")
+            self._require_inference_access()
             if switching:
                 assert variant is not None
                 await self._cancel_recovery()
@@ -197,19 +198,28 @@ class Supervisor:
                 if self.current != config or self.status != "ready":
                     raise ApiError(503, "Не удалось запустить запрошенную модель.",
                                    "model_start_failed", "server_error", param="model")
+                self._require_inference_access()
             self._inference_users += 1
-            self._inference_idle.clear()
+            self._inference_drained_or_stopping.clear()
         try:
             yield
         finally:
             self._inference_users -= 1
             if not self._inference_users:
-                self._inference_idle.set()
+                self._inference_drained_or_stopping.set()
+
+    def _require_inference_access(self) -> None:
+        if self._shutting_down or self._stop_requests:
+            raise ApiError(503, "Движок останавливается.", "engine_not_ready", "server_error")
+
+    async def _drain_inference(self) -> None:
+        await self._inference_drained_or_stopping.wait()
+        self._require_inference_access()
 
     @contextlib.asynccontextmanager
     async def _exclusive_engine(self) -> AsyncIterator[None]:
         async with self._lock:
-            await self._inference_idle.wait()
+            await self._drain_inference()
             yield
 
     def env_divergence(self) -> dict[str, dict[str, Any]]:
@@ -315,7 +325,7 @@ class Supervisor:
     def comparison_allowed(self) -> bool:
         recovering = self._restart_task is not None and not self._restart_task.done()
         reloading = self._native_reload_task is not None and not self._native_reload_task.done()
-        return not (self._shutting_down or self._lock.locked() or recovering or reloading)
+        return not (self._shutting_down or self._stop_requests or self._lock.locked() or recovering or reloading)
 
     def begin_comparison[T](
         self, run: Callable[[], Coroutine[Any, Any, T]],
@@ -686,18 +696,29 @@ class Supervisor:
         await wait_uninterrupted(asyncio.create_task(self._stop_engine()))
 
     async def _stop_engine(self) -> None:
-        interrupted = None
-        if (task := self._native_reload_task) is not None and not task.done():
-            interrupted = self.current
-            if not task.cancelling():
-                task.cancel()
-        async with self._exclusive_engine():
-            await self._cancel_recovery()
-            running = self.current or interrupted
-            await self.process.stop()
-            self._request_model = None
-            self._set_status("stopped", "Движок остановлен", "idle.stopped")
-            self.journal.record("idle.stopped", uuid4(), variant=running.variant if running else None)
+        self._stop_requests += 1
+        # Wake a model switch or deploy holding the engine lock while inference drains.
+        if (recovery := self._restart_task) is not None and not recovery.done():
+            recovery.cancel()
+        self._inference_drained_or_stopping.set()
+        try:
+            interrupted = None
+            if (task := self._native_reload_task) is not None and not task.done():
+                interrupted = self.current
+                if not task.cancelling():
+                    task.cancel()
+            await self._cancel_comparison()
+            async with self._lock:
+                await self._cancel_recovery()
+                running = self.current or interrupted
+                await self.process.stop()
+                self._request_model = None
+                self._set_status("stopped", "Движок остановлен", "idle.stopped")
+                self.journal.record("idle.stopped", uuid4(), variant=running.variant if running else None)
+        finally:
+            self._stop_requests -= 1
+            if not self._stop_requests and self._inference_users:
+                self._inference_drained_or_stopping.clear()
 
     async def _cancel_recovery(self) -> None:
         if self._restart_task is not None:
@@ -726,7 +747,7 @@ class Supervisor:
 
     def _on_engine_exit(self, code: int) -> None:
         # Сбой до готовности обрабатывает ветка запуска, а не отдельный сторож.
-        if self._shutting_down or self._status == "starting":
+        if self._shutting_down or self._stop_requests or self._status == "starting":
             return
         self.restart_count += 1
         self._set_status(

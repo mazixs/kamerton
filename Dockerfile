@@ -37,7 +37,7 @@ RUN npm ci --no-audit --no-fund
 COPY frontend/ ./
 RUN npm run build
 
-FROM runtime-base AS app
+FROM runtime-base AS app-base
 COPY --from=dependencies /opt/venv /opt/venv
 COPY --from=engine /usr/local/bin/gigastt /usr/local/bin/gigastt
 
@@ -77,7 +77,7 @@ RUN python -m ensurepip \
     && python -m pip install --no-cache-dir sherpa-onnx==2.0.3 onnxruntime==1.32.0 tokenizers==0.23.3 numpy==2.5.5 \
     && python -m pip uninstall -y pip
 
-FROM app AS multiengine
+FROM app-base AS multiengine
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg libgomp1 \
     && rm -rf /var/lib/apt/lists/*
@@ -102,6 +102,8 @@ FROM multiengine AS gigaam-v4
 COPY --from=gigaam-v4-dependencies /opt/gigaam-v4 /opt/gigaam-v4
 ENV GIGAAM_V4_PYTHON=/opt/gigaam-v4/bin/python
 
-FROM app AS standard
+FROM app-base AS app
 COPY backend/ /app/backend/
 COPY --from=web-build /web/dist/ /app/frontend/dist/
+
+FROM app AS standard

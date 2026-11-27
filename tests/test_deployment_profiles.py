@@ -129,9 +129,11 @@ def test_npm_gitops_yaml_only(config, tmp_path):
         "KAMERTON_MODEL_DIR": str(models),
         "KAMERTON_PORT": "18999",
         "KAMERTON_IMAGE": "kamerton:arcane-example",
+        "KAMERTON_BUILD_TARGET": "gigaam-v4",
     })
     app, cli = (resolved["services"][name] for name in ("kamerton", "owner-cli"))
     assert app["build"]["context"] == context
+    assert app["build"]["target"] == "gigaam-v4"
     assert app["image"] == cli["image"] == "kamerton:arcane-example"
     assert str(app["ports"][0]["published"]) == "18999"
     assert mounts(app) == {"/data": data, "/models": models}
