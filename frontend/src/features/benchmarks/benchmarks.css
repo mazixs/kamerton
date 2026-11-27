@@ -1,0 +1,86 @@
+.benchmark-card {container:benchmark-report / inline-size; gap:.75rem; border-color:var(--line)}
+.benchmark-card:not([data-expanded]) {max-inline-size:65rem}
+.benchmark-card :is([data-slot="card-header"],[data-slot="card-content"]) {
+  padding-inline:clamp(.875rem, 2.5cqi, 1.5rem);
+}
+.benchmark-card .benchmark-toolbar {display:flex; align-items:center; justify-content:space-between; gap:.75rem}
+.benchmark-overflow {
+  max-inline-size:100%;
+  max-block-size:min(68svh, 44rem);
+  overflow:auto;
+  border:1px solid var(--line);
+  border-radius:.3rem;
+}
+.benchmark-overflow:focus-visible {outline:2px solid var(--focus); outline-offset:2px}
+.benchmark-table {
+  --model-column:14rem;
+  --metric-column:6rem;
+  inline-size:max(100%, calc(var(--model-column) + var(--metric-column) * var(--metric-count)));
+  table-layout:fixed;
+  border-collapse:separate;
+  border-spacing:0;
+}
+.benchmark-model-width {inline-size:var(--model-column)}
+.benchmark-metric-width {inline-size:var(--metric-column)}
+.benchmark-table :is(th,td) {height:auto; padding:.4375rem .5rem; line-height:1.35}
+.benchmark-table thead {position:sticky; inset-block-start:0; z-index:2}
+.benchmark-table thead th {
+  background:var(--secondary-surface);
+  border-block-end:1px solid var(--line);
+}
+.benchmark-table th:has(> button) {padding:0}
+.benchmark-table th > button {
+  display:grid;
+  grid-template-columns:minmax(0, 1fr) .875rem;
+  inline-size:100%;
+  block-size:auto;
+  min-block-size:2rem;
+  padding:.25rem .5rem;
+  gap:.25rem;
+  text-align:end;
+  white-space:normal;
+  overflow-wrap:normal;
+  font-size:.8125rem;
+  line-height:1.25;
+  border-color:transparent;
+  background:transparent;
+}
+.benchmark-sort-icon {display:grid; place-items:center}
+.benchmark-table th > button:enabled:hover {background:var(--signal); border-color:transparent}
+.benchmark-table th > button:focus-visible {outline-offset:-3px}
+.benchmark-toolbar button[aria-pressed="true"] {background:var(--secondary-surface); border-color:var(--accent)}
+.benchmark-table [data-model-column] {
+  position:sticky;
+  inset-inline-start:0;
+  white-space:normal;
+  overflow-wrap:anywhere;
+}
+.benchmark-table thead [data-model-column] {z-index:3}
+.benchmark-table tbody [data-model-column] {z-index:1; background:var(--card)}
+.benchmark-table tbody tr:not(:last-child) > * {border-block-end:1px solid var(--line)}
+.benchmark-table [data-group-start] {border-inline-start:1px solid var(--line)}
+.benchmark-table td {text-align:end; font-variant-numeric:tabular-nums}
+.benchmark-value {
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:.375rem;
+  font-size:.875rem;
+}
+.benchmark-number {text-box:trim-both cap alphabetic}
+.benchmark-rank {flex:none; inline-size:1rem; block-size:1rem; justify-content:center; padding:0}
+.benchmark-rank > span {text-box:trim-both cap alphabetic}
+.benchmark-table strong {font-weight:700}
+.benchmark-model-token {white-space:nowrap}
+.benchmark-best {display:block; margin-block-start:.2rem; color:var(--muted-foreground); font-size:.6875rem; font-weight:400; line-height:1.35}
+.benchmark-missing {color:var(--muted-foreground)}
+.benchmark-methods {margin-block-start:.875rem; color:var(--muted-foreground); font-size:.875rem}
+.benchmark-methods summary {inline-size:fit-content; cursor:pointer; color:var(--foreground)}
+.benchmark-methods dl {display:grid; gap:.625rem; margin-block-start:.625rem}
+.benchmark-methods dt {font-weight:600; color:var(--foreground)}
+@container benchmark-report (width < 45rem) {
+  .benchmark-table {--model-column:clamp(8.5rem, 24cqi, 11rem); --metric-column:5.375rem}
+}
+@container benchmark-report (width < 28rem) {
+  .benchmark-card .benchmark-toolbar {flex-wrap:wrap}
+}

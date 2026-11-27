@@ -32,6 +32,8 @@ PROFILES = {
     "caddy": (".env.public", ".env.public.example", ("docker-compose.yml", "docker-compose.public.yml")),
 }
 OWNER_VARS = {"ADMIN_PASSWORD", "ADMIN_PASSWORD_FILE", "ADMIN_USERNAME"}
+APP_SERVICE = "kamerton"
+LEGACY_APP_SERVICE = "stt-api"
 NETWORK_LABEL = "ru.kamerton.installation"
 IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
 VERSION = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?\Z")
@@ -293,8 +295,12 @@ class Installation:
         return self.root / PROFILES[self.profile][0]
 
     @property
+    def app_service(self):
+        return self.state.get("app_service", LEGACY_APP_SERVICE)
+
+    @property
     def services(self):
-        return ["stt-api", "caddy"] if self.profile == "caddy" else ["stt-api"]
+        return [self.app_service, "caddy"] if self.profile == "caddy" else [self.app_service]
 
     def initialize(self, profile, image):
         if exist(self.private):
@@ -333,7 +339,8 @@ class Installation:
             mount.mkdir(mode=0o700)
             write_private(mount / ".kamerton-installation", install_id, exclusive=True)
         self.state = {"schema": 1, "root": str(self.root), "id": install_id, "profile": profile,
-                      "initial_image": image, "templates": {name: fingerprint(self.templates / name) for name in names}}
+                      "initial_image": image, "app_service": APP_SERVICE,
+                      "templates": {name: fingerprint(self.templates / name) for name in names}}
         self.save()
 
     def save(self):
@@ -348,6 +355,7 @@ class Installation:
         self.state = parsed(plain(self.marker, private=True).read_bytes(), "Повреждена запись установки.")
         require(isinstance(self.state, dict) and self.state.get("schema") == 1 and
                 self.state.get("root") == str(self.root) and self.state.get("profile") in PROFILES and
+                self.app_service in (APP_SERVICE, LEGACY_APP_SERVICE) and
                 re.fullmatch(r"[0-9a-f]{20}", self.state.get("id", "")),
                 "Запись установки повреждена или создана для другого каталога.")
 
@@ -411,7 +419,7 @@ class Installation:
         require(set(services) == set(self.services) | ({"owner-cli"} if self.profile != "local" else set()),
                 "В Compose найден неожиданный состав служб.")
         require(model.get("name") == self.project, "Compose выбрал неверный проект.")
-        app = services["stt-api"]
+        app = services[self.app_service]
         env = app.setdefault("environment", {})
         no_owner_secrets(env)
         for key, expected in {"DATA_DIR": "/data", "MODEL_DIR": "/models", "CONSOLE_PORT": "8080", "ENGINE_HOST": "127.0.0.1"}.items():
@@ -459,7 +467,7 @@ class Installation:
         return model
 
     def validate_caddy(self, model, host, proxy):
-        app, caddy = (model["services"][name] for name in ("stt-api", "caddy"))
+        app, caddy = (model["services"][name] for name in (self.app_service, "caddy"))
         require(caddy.get("environment") == {"KAMERTON_DOMAIN": host} and
                 set(model.get("volumes", {})) == {"caddy_data", "caddy_config"}, "Неверный домен или тома Caddy.")
         mounts = {item["target"]: item for item in caddy.get("volumes", [])}
@@ -545,7 +553,7 @@ class Installation:
             svc["image"] = caddy_tag if name == "caddy" else app_tag
             svc["pull_policy"] = "never"
             svc["labels"] = {NETWORK_LABEL: self.id}
-        env = model["services"]["stt-api"]["environment"]
+        env = model["services"][self.app_service]["environment"]
         env.update(DATA_DIR="/data", MODEL_DIR="/models", CONSOLE_PORT="8080", ENGINE_HOST="127.0.0.1")
         env.setdefault("AUTOSTART", "1")
         if self.profile == "local":
@@ -556,7 +564,7 @@ class Installation:
     def prepare_initial(self, rendered):
         if "prepared" not in self.state:
             app_tag = self.state["initial_image"]
-            app_tag = self.pin(app_tag, "app") if app_tag else self.build("app", rendered["services"]["stt-api"]["build"])
+            app_tag = self.pin(app_tag, "app") if app_tag else self.build("app", rendered["services"][self.app_service]["build"])
             caddy_tag = self.build("caddy", {}) if self.profile == "caddy" else None
             self.state["prepared"] = [app_tag, caddy_tag]
             self.save()
@@ -567,7 +575,7 @@ class Installation:
         if active is None:
             raise Failure("Стек ещё не был успешно запущен.")
         svcs = active["services"]
-        model = self.model(rendered, svcs["stt-api"]["image"], svcs.get("caddy", {}).get("image"))
+        model = self.model(rendered, svcs[self.app_service]["image"], svcs.get("caddy", {}).get("image"))
         require(model == active, "Параметры установки изменены. Верните прежний env; смена топологии требует ручной миграции.")
         return model
 
@@ -640,7 +648,7 @@ class Installation:
                         require(networks[model["networks"][key]["name"]]["IPAddress"] == settings["ipv4_address"],
                                 f"У контейнера {name} другой IP-адрес.")
             if healthy:
-                require(obj["State"]["Running"] and (name != "stt-api" or
+                require(obj["State"]["Running"] and (name != self.app_service or
                         obj["State"].get("Health", {}).get("Status") == "healthy"),
                         f"Служба {name} не прошла проверку запуска.")
         return actual
@@ -655,7 +663,7 @@ class Installation:
         return status
 
     def wait_engine(self, variant):
-        id_ = self.owned()["stt-api"]["Id"]
+        id_ = self.owned()[self.app_service]["Id"]
         if variant is None:
             self.engine_health(id_)
             return
@@ -683,7 +691,7 @@ class Installation:
         self.verify_actual(model, healthy=True)
 
     def probe(self, model, mode):
-        app = model["services"]["stt-api"]
+        app = model["services"][self.app_service]
         image = self.image_id(app["image"])
         args = ["run", "--rm", "--pull", "never", "--network", "none", "--read-only", "--entrypoint", "python"]
         for name in ("data", "models"):
@@ -703,7 +711,7 @@ class Installation:
     def probe_owner_contract(self, model):
         if self.profile == "local":
             return
-        app = model["services"]["stt-api"]
+        app = model["services"][self.app_service]
         env = app["environment"]
         args = ["run", "--rm", "--pull", "never", "--network", "none", "--read-only", "--tmpfs", "/data",
                 "--tmpfs", "/models", "--tmpfs", "/tmp", "--entrypoint", "python",
@@ -729,7 +737,7 @@ class Installation:
         self.state["active"] = model
         self.save()
         print(f"Камертон запущен: профиль {self.profile}, проект {self.project}.")
-        app = model["services"]["stt-api"]
+        app = model["services"][self.app_service]
         if self.profile == "local":
             print(f"Консоль: http://127.0.0.1:{app['ports'][0]['published']}")
         else:
@@ -808,7 +816,7 @@ class Installation:
                 details = self.inspect_many("volume", [vol["name"]])[0]
                 require((details.get("Labels") or {}).get(NETWORK_LABEL) == self.id, "Том Caddy не принадлежит установке.")
                 cmd += ["--mount", f"type=volume,source={vol['name']},target=/{short},readonly"]
-            image = self.image_id(model["services"]["stt-api"]["image"])
+            image = self.image_id(model["services"][self.app_service]["image"])
             with (working / "data.tar").open("xb") as sink:
                 os.chmod(working / "data.tar", 0o600)
                 self.docker(cmd + [image, "-E", "-c", ARCHIVE, "data", *model.get("volumes", {})],
@@ -857,11 +865,11 @@ class Installation:
             self.probe_owner_contract(candidate)
         variant = None
         if running:
-            health = self.engine_health(actual["stt-api"]["Id"])
+            health = self.engine_health(actual[self.app_service]["Id"])
             require(health["engine_status"] not in {"downloading", "starting"},
                     "Модель загружается или стартует. Дождитесь завершения и повторите команду.")
             if health["engine_status"] == "ready":
-                env = model["services"]["stt-api"].get("environment", {})
+                env = model["services"][self.app_service].get("environment", {})
                 require(str(env.get("AUTOSTART", "1")).lower() in {"1", "true", "on", "yes", "t", "y"},
                         "При AUTOSTART=0 живая модель не восстановится после перезапуска. "
                         "Остановите модель в UI, когда будете готовы, и повторите команду.")
@@ -903,10 +911,10 @@ class Installation:
         self.verify_actual(old, healthy=True)
         candidate = copy.deepcopy(old)
         tag = self.pin(image, "app") if image else self.build("app", {}, version=version)
-        if tag == old["services"]["stt-api"]["image"]:
+        if tag == old["services"][self.app_service]["image"]:
             print("Этот образ уже используется; изменений нет.")
             return
-        for name in ("stt-api", "owner-cli"):
+        for name in (self.app_service, "owner-cli"):
             if name in candidate["services"]:
                 candidate["services"][name]["image"] = tag
         self.transaction("update", candidate, version or image)
@@ -959,7 +967,7 @@ def parser():
                             ("recover", "восстановить контейнеры после прерванной операции")]:
         sub.add_parser(name, help=help_text)
     logs = sub.add_parser("logs", help="журнал контейнеров этого проекта")
-    logs.add_argument("--follow", "-f", action="store_true", help="следить за журналом приложения (stt-api)")
+    logs.add_argument("--follow", "-f", action="store_true", help="следить за журналом приложения")
     owner = sub.add_parser("owner", help="создать владельца или сменить пароль")
     owner.add_argument("action", choices=("create", "reset-password"))
     owner.add_argument("--username", help="имя владельца; без флага CLI спросит его")
@@ -1002,8 +1010,8 @@ def main(argv=None):
                 actual = shop.owned()
                 require(actual, "Контейнеры ещё не созданы.")
                 if args.follow:
-                    require("stt-api" in actual, "Контейнер приложения ещё не создан.")
-                    follow_id = actual["stt-api"]["Id"]
+                    require(shop.app_service in actual, "Контейнер приложения ещё не создан.")
+                    follow_id = actual[shop.app_service]["Id"]
                 else:
                     for name, obj in actual.items():
                         print(f"--- {name} ---", flush=True)

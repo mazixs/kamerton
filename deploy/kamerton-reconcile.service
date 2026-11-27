@@ -1,0 +1,9 @@
+[Unit]
+Description=Check and recover the Kamerton Compose service
+After=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/kamerton/reconcile.env
+ExecStart=/usr/bin/python3 /usr/local/libexec/kamerton-reconcile.py
+TimeoutStartSec=90s

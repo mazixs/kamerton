@@ -20,7 +20,7 @@ https://{$KAMERTON_DOMAIN} {
 	@private path /health /health/*
 	respond @private 404
 
-	reverse_proxy stt-api:8080 {
+	reverse_proxy kamerton:8080 {
 		header_up -Forwarded
 		header_up Host {http.request.hostport}
 		# Caddy сам задаёт X-Forwarded-Host/For/Proto по принятому соединению.

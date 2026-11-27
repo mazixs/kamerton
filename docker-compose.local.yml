@@ -1,9 +1,9 @@
 # See README.md#development. Use a separate checkout for isolated data and models.
-name: stt-api-local
+name: kamerton-local
 services:
-  stt-api:
-    image: stt-api-console:local
-    container_name: stt-api-local
+  kamerton:
+    image: kamerton:local
+    container_name: kamerton-local
     restart: "no"
     # Appends to the base service's .env; this affects container variables only.
     env_file:

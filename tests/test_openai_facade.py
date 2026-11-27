@@ -1,9 +1,11 @@
+import asyncio
 import hashlib
 
 import httpx
 import pytest
 
-from console.catalog import HEADS, openai_model_id
+from console import proxy
+from console.catalog import openai_model_id
 from console.state import EngineConfig
 from conftest import opus_code3_packet, wav_bytes, webm_opus_bytes
 
@@ -71,35 +73,224 @@ async def test_failed_stream_releases_engine_and_is_not_a_success(client_ready, 
     assert client_ready.app.state.metrics.snapshot()["count"] == 0
 
 
-async def test_client_model_id_stays_stable_as_cabinet_switches_heads(client_stopped):
+@pytest.mark.parametrize("path", ["/v1/audio/transcriptions", "/v1/transcribe"])
+async def test_engine_connection_error_returns_502_and_closes_client(client_ready, path, monkeypatch):
+    def fail_connection(request):
+        raise httpx.ConnectError("connection refused", request=request)
+
+    upstream = httpx.AsyncClient(transport=httpx.MockTransport(fail_connection))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: upstream)
+
+    response = await client_ready.post(path, files=AUDIO)
+
+    assert response.status_code == 502
+    assert response.json()["error"] == {
+        "message": "Движок не ответил: connection refused",
+        "type": "server_error",
+        "code": "engine_unreachable",
+        "param": None,
+    }
+    assert upstream.is_closed
+
+
+@pytest.mark.parametrize("path", ["/v1/audio/transcriptions", "/v1/transcribe"])
+async def test_cancelled_engine_send_closes_client(client_ready, path, monkeypatch):
+    async def cancel_send(_request):
+        raise asyncio.CancelledError
+
+    upstream = httpx.AsyncClient(transport=httpx.MockTransport(cancel_send))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: upstream)
+
+    with pytest.raises(asyncio.CancelledError):
+        await client_ready.post(path, files=AUDIO)
+
+    assert upstream.is_closed
+
+
+async def test_client_lists_downloaded_models_and_starts_requested_model(client_stopped):
     client = client_stopped
     supervisor = client.app.state.supervisor
 
-    async def check_model(variant):
-        payload = (await client.get("/v1/models")).json()
+    async def check_models(downloaded, variant):
+        result = await client.get("/v1/models")
+        assert result.headers["cache-control"] == "no-store"
+        payload = result.json()
         assert payload["object"] == "list"
-        model, = payload["data"]
-        assert (model["id"], model["variant"], model["deployed"]) == ("kamerton", variant, variant is not None)
-        owner_model, = (await client.get("/api/client-models")).json()["data"]
-        assert {k: v for k, v in model.items() if k != "created"} == {
-            k: v for k, v in owner_model.items() if k != "created"
-        }
+        assert [model["id"] for model in payload["data"]] == [
+            *(openai_model_id(head) for head in downloaded), *(["kamerton"] if variant else []),
+        ]
+        assert all(model["deployed"] == (model["variant"] == variant) for model in payload["data"])
+        assert all(not any(char.isspace() for char in model["id"]) for model in payload["data"])
+        assert (await client.get("/api/client-models")).json() == payload
         assert (await client.get("/api/status")).json()["engine"]["variant"] == variant
 
-    await check_model(None)
+    await check_models([], None)
     await supervisor.deploy(EngineConfig())
-    await check_model("rnnt")
-    assert (await client.post("/api/deploy", json={"variant": "ml_ctc"})).status_code == 202
-    await client.app.state.deploy_task
-    await check_model("ml_ctc")
+    await check_models(["rnnt"], "rnnt")
+    await supervisor.deploy(EngineConfig(variant="ml_ctc"))
+    await supervisor.stop_engine()
+    await check_models(["rnnt", "ml_ctc"], None)
+    response = await client.post("/v1/audio/transcriptions", files=AUDIO, data={"model": openai_model_id("rnnt")})
+    assert response.status_code == 200
+    assert (await engine_upload(client))["variant"] == "rnnt"
+    await check_models(["rnnt", "ml_ctc"], "rnnt")
+    assert supervisor.state_file.load().desired.variant == "ml_ctc"
+    response = await client.post("/v1/audio/transcriptions", files=AUDIO, data={"model": openai_model_id("ml_ctc")})
+    assert response.status_code == 200
+    assert (await engine_upload(client))["variant"] == "ml_ctc"
     pid = supervisor.process.pid
-    for model_id in ("kamerton", "whisper-1", *(openai_model_id(head) for head in HEADS)):
+    for model_id in ("kamerton", "whisper-1", openai_model_id("ml_ctc")):
         response = await client.post("/v1/audio/transcriptions", files=AUDIO, data={"model": model_id})
         assert response.status_code == 200
+        assert response.headers["X-Kamerton-Cache"] == ("HIT" if model_id == openai_model_id("ml_ctc") else "MISS")
         assert (await engine_upload(client))["variant"] == "ml_ctc"
+    for model_id, code in (
+        (openai_model_id("ml_ctc_large"), "model_not_available"), ("made-up-model", "model_not_found"),
+    ):
+        response = await client.post("/v1/audio/transcriptions", files=AUDIO, data={"model": model_id})
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == code
+        assert response.json()["error"]["param"] == "model"
+    assert client.app.state.metrics.snapshot()["count"] == 4
     assert supervisor.process.pid == pid
     await supervisor.stop_engine()
-    await check_model(None)
+    await check_models(["rnnt", "ml_ctc"], None)
+
+
+async def test_transcription_checks_process_generation_when_sending_upload(client_ready, monkeypatch):
+    supervisor = client_ready.app.state.supervisor
+    open_engine_stream = proxy._open_engine_stream
+    generation = supervisor.process.generation
+
+    async def restart_before_connecting(*args, **kwargs):
+        # Имитируем смену процесса в обход диспетчера.
+        await supervisor.process.stop()
+        await supervisor.process.start(EngineConfig())
+        await supervisor.process.wait_healthy()
+        assert supervisor.process.generation > generation
+        return await open_engine_stream(*args, **kwargs)
+
+    monkeypatch.setattr(proxy, "_open_engine_stream", restart_before_connecting)
+    response = await client_ready.post(
+        "/v1/audio/transcriptions", files=AUDIO, data={"model": openai_model_id("rnnt")},
+    )
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "engine_not_ready"
+    assert response.headers["retry-after"] == "5"
+    assert client_ready.app.state.metrics.snapshot()["count"] == 0
+
+
+async def test_model_switch_waits_for_stream_and_same_model_can_reuse_engine(client_ready, monkeypatch):
+    supervisor = client_ready.app.state.supervisor
+    await supervisor.deploy(EngineConfig(variant="ml_ctc"))
+    await supervisor.deploy(EngineConfig())
+    pid = supervisor.process.pid
+    waiting_for_stream, release_stream = asyncio.Event(), asyncio.Event()
+    open_engine_stream = proxy._open_engine_stream
+
+    async def hold_first_stream(*args, **kwargs):
+        client, response = await open_engine_stream(*args, **kwargs)
+        if response.headers.get("content-type", "").startswith("text/event-stream"):
+            chunks = response.aiter_raw
+
+            async def delayed_chunks():
+                waiting_for_stream.set()
+                await release_stream.wait()
+                async for chunk in chunks():
+                    yield chunk
+
+            response.aiter_raw = delayed_chunks
+        return client, response
+
+    monkeypatch.setattr(proxy, "_open_engine_stream", hold_first_stream)
+
+    async def recognize(variant, **fields):
+        return await client_ready.post("/v1/audio/transcriptions", files=AUDIO,
+                                       data={"model": openai_model_id(variant), **fields})
+
+    first = asyncio.create_task(recognize("rnnt", stream="true"))
+    pending = [first]
+    try:
+        await asyncio.wait_for(waiting_for_stream.wait(), 5)
+        same = await asyncio.wait_for(recognize("rnnt"), 5)
+        assert same.status_code == 200 and supervisor.process.pid == pid
+        second = asyncio.create_task(recognize("ml_ctc"))
+        pending.append(second)
+        async with asyncio.timeout(5):
+            while not supervisor._lock.locked():
+                await asyncio.sleep(0.01)
+        assert supervisor.process.pid == pid and not second.done()
+        release_stream.set()
+        assert "[DONE]" in (await asyncio.wait_for(first, 5)).text
+        assert (await asyncio.wait_for(second, 15)).status_code == 200
+        assert (await engine_upload(client_ready))["variant"] == "ml_ctc"
+    finally:
+        for task in pending:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+async def test_failed_request_model_restores_previous_engine(client_ready, monkeypatch):
+    supervisor = client_ready.app.state.supervisor
+    await supervisor.deploy(EngineConfig(variant="ml_ctc"))
+    await supervisor.deploy(EngineConfig())
+    monkeypatch.setenv("FAKE_UNHEALTHY_VARIANT", "ml_ctc")
+    monkeypatch.setattr("console.supervisor.STARTUP_TIMEOUT", 2)
+    rejected = await client_ready.post(
+        "/v1/audio/transcriptions", files=AUDIO, data={"model": openai_model_id("ml_ctc")},
+    )
+    assert rejected.status_code == 503 and rejected.json()["error"]["code"] == "model_start_failed"
+    assert supervisor.current.variant == supervisor.state_file.load().desired.variant == "rnnt"
+    assert (await client_ready.post("/v1/audio/transcriptions", files=AUDIO, data={"model": "kamerton"})).status_code == 200
+
+
+async def test_request_model_preserves_local_native_job_engine(client_ready):
+    supervisor = client_ready.app.state.supervisor
+    await supervisor.deploy(EngineConfig(variant="ml_ctc"))
+    supervisor.settings.enable_jobs = True
+    await supervisor.deploy(EngineConfig())
+    pid = supervisor.process.pid
+    response = await client_ready.post(
+        "/v1/audio/transcriptions", files=AUDIO, data={"model": openai_model_id("ml_ctc")},
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "model_switch_jobs_enabled"
+    assert supervisor.process.pid == pid
+    same = await client_ready.post("/v1/audio/transcriptions", files=AUDIO, data={"model": openai_model_id("rnnt")})
+    assert same.status_code == 200
+
+
+async def test_previous_model_still_serves_after_replacement_download_fails(client_ready, monkeypatch):
+    supervisor = client_ready.app.state.supervisor
+    generation = supervisor.process.generation
+    monkeypatch.setenv("FAKE_DOWNLOAD_FAIL", "disk")
+    await supervisor.deploy(EngineConfig(variant="e2e_rnnt"))
+    assert supervisor.detail_code == "download.failed"
+    assert supervisor.process.generation == generation
+    models = (await client_ready.get("/v1/models")).json()["data"]
+    assert [model["id"] for model in models] == ["gigaam-v3-rnnt", "kamerton"]
+    for model in models:
+        transcript = await client_ready.post("/v1/audio/transcriptions", files=AUDIO, data={"model": model["id"]})
+        assert transcript.json() == {"text": "привет мир"}
+        assert (await engine_upload(client_ready))["variant"] == "rnnt"
+    undeployed = await client_ready.post(
+        "/v1/audio/transcriptions", files=AUDIO, data={"model": "gigaam-v3-e2e-rnnt"},
+    )
+    assert undeployed.status_code == 404
+    assert undeployed.json()["error"]["code"] == "model_not_available"
+
+
+@pytest.mark.parametrize("model_fields", [[("model", (None, ""))], [
+    ("model", (None, "kamerton")), ("model", (None, "whisper-1")),
+]])
+async def test_invalid_model_field_rejected(client_ready, model_fields):
+    response = await client_ready.post(
+        "/v1/audio/transcriptions", files=[*AUDIO.items(), *model_fields],
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_model"
+    assert response.json()["error"]["param"] == "model"
 
 
 async def test_translations_rejected_with_explanation(client_ready):
@@ -114,7 +305,16 @@ async def test_503_with_retry_after_when_engine_not_ready(client_stopped):
     assert response.status_code == 503
     assert response.headers["retry-after"] == "5"
     assert response.json()["error"]["code"] == "engine_not_ready"
-    assert "Развернуть" in response.json()["error"]["message"]
+    assert "Разверните" in response.json()["error"]["message"]
+
+
+async def test_engine_diagnostics_stay_out_of_client_error(client_stopped):
+    supervisor = client_stopped.app.state.supervisor
+    supervisor._set_status("error", "unpublished /internal/model/file")
+    response = await client_stopped.post("/v1/audio/transcriptions", files=AUDIO, data={"model": "kamerton"})
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "engine_not_ready"
+    assert "/internal/model/file" not in response.text
 
 
 async def test_missing_file_rejected(client_ready):

@@ -1,354 +1,102 @@
+import base64
 import os
 import re
-from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
 
-from conftest import route_paths, wav_bytes
+from conftest import wav_bytes
 
 
-STATIC = Path(__file__).resolve().parents[1] / "console" / "static"
+SOURCE = Path(__file__).resolve().parents[1] / "frontend" / "src"
 
 
-class Inputs(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.by_id = {}
+def locale_keys(lang):
+    source = (SOURCE / "shared" / "i18n" / f"{lang}.js").read_text(encoding="utf-8")
+    return set(re.findall(r'"([\w.]+)":', source))
 
-    def handle_starttag(self, _tag, attrs):
-        attrs = dict(attrs)
-        if "id" in attrs:
-            assert attrs["id"] not in self.by_id, attrs["id"]
-            self.by_id[attrs["id"]] = attrs
 
+def test_both_languages_cover_the_same_keys():
+    english, russian = locale_keys("en"), locale_keys("ru")
+    assert english == russian, english ^ russian
+    assert len(english) > 100
+    for code in ("weight_off", "weight_ignored", "weight_invalid", "comment", "tab", "short"):
+        assert f"issue.{code}" in english
 
-def test_glossary_starts_locked_and_file_pickers_are_native():
-    markup = Inputs()
-    markup.feed((STATIC / "index.html").read_text(encoding="utf-8"))
-    for name in ("glossary-editor", "btn-glossary", "config-editor"):
-        assert "disabled" in markup.by_id[name]
-    assert markup.by_id["opt-boost"]["step"] == "any"  # API допускает, например, 4.25
-    assert "hidden" in markup.by_id["btn-compare"]  # до файла только действие выбора
-    for name in ("file-input", "compare-file", "glossary-file"):
-        attrs = markup.by_id[name]
-        assert attrs["type"] == "file" and "data-i18n-aria" in attrs
-        assert "hidden" not in attrs and attrs.get("tabindex") != "-1"
 
+async def test_page_is_revalidated_and_build_assets_are_fingerprinted(client_stopped):
+    response = await client_stopped.get("/")
+    assert response.status_code == 200 and "no-cache" in response.headers["cache-control"]
+    assert 'id="root"' in response.text and '<html lang="en">' in response.text
+    assert 'type="module"' in response.text
+    assets = set(re.findall(r'/static/assets/[\w-]+-[\w-]{8}\.(?:js|css)', response.text))
+    assert {Path(asset).suffix for asset in assets} == {".js", ".css"}
+    for asset in assets:
+        result = await client_stopped.get(asset)
+        assert result.status_code == 200
+        assert "immutable" in result.headers["cache-control"]
 
-def test_example_origin_is_isolated_from_transport_and_key():
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
-    assert 'return url.origin + "/v1"' in js or 'url.origin + "/v1" : null' in js
-    snippets = js.split("function renderSnippets()", 1)[1].split("\n}", 1)[0]
-    assert "clientBase()" in snippets and '"/api/docs?api_key="' in snippets
-    assert not re.search(r"\b(?:fetch|api)\(", snippets)
-    assert "state.key" not in snippets.split('$("link-docs")')[0]
-    assert 'mode: "same-origin"' in js and 'redirect: "error"' in js
-    assert 'api("/v1/models")' in js and '/v1/models?api_key=' not in js
 
+async def test_microphone_worklet_keeps_its_same_origin_url(client_stopped):
+    result = await client_stopped.get("/static/capture-worklet.js")
+    assert result.status_code == 200
+    assert "javascript" in result.headers["content-type"]
+    assert "registerProcessor" in result.text
+    assert "no-cache" in result.headers["cache-control"]
 
-def test_journal_and_comparison_use_separate_server_contracts():
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
-    assert 'api("/api/journal")' in js and 'api("/api/compare"' in js
-    for field in ("variant_a", "variant_b", "file"):
-        assert f'form.append("{field}"' in js
-    assert 'compare_enabled === true' in js
-    assert 'innerHTML' not in js
 
-
-
-async def test_index_served_with_expected_sections(client_ready):
-    """Разметка по-английски: это язык по умолчанию, русский включается кнопкой."""
-    html = (await client_ready.get("/")).text
-    for page in ("dict", "compare", "api", "models", "settings", "glossary", "status", "journal"):
-        assert f'data-page="{page}"' in html
-        assert f'href="#{page}"' in html
-    assert "Kamerton" in html and "Dictation" in html
-
-
-async def test_index_links_its_own_assets(client_ready):
-    html = (await client_ready.get("/")).text
-    assert "/static/style.css" in html and "/static/app.js" in html
-    assert "/static/i18n.js" in html
-    assert (await client_ready.get("/static/style.css")).status_code == 200
-    assert (await client_ready.get("/static/app.js")).status_code == 200
-    assert (await client_ready.get("/static/i18n.js")).status_code == 200
-
-
-async def test_app_js_only_calls_existing_endpoints(client_ready):
-    js = (await client_ready.get("/static/app.js")).text
-    called = set(re.findall(r"""fetch\(\s*["'`](/[^"'`?]+)""", js))
-    called |= set(re.findall(r"""api\(\s*["'](/[^"'?]+)""", js))
-    routes = route_paths(client_ready.app)
-    assert called, "app.js should talk to the console API"
-    assert called <= routes, f"unknown endpoints: {called - routes}"
-
-
-async def test_event_source_url_is_a_real_route(client_ready):
-    js = (await client_ready.get("/static/app.js")).text
-    assert 'EventSource("/api/events"' in js
-    assert "/api/events" in route_paths(client_ready.app)
-
-
-async def test_mic_recording_produces_wav_client_side(client_ready):
-    js = (await client_ready.get("/static/app.js")).text
-    assert "AudioContext" in js  # capture without MediaRecorder containers
-    assert "RIFF" in js  # WAV assembled in the browser, so no ffmpeg in the image
-    assert "getUserMedia" in js
-
-
-async def test_ui_shows_latency_comparison(client_ready):
-    html = (await client_ready.get("/")).text
-    assert "bar-audio" in html and "bar-work" in html
-    texts = (await client_ready.get("/static/i18n.js")).text
-    assert "быстрее реального времени" in texts and "faster than real time" in texts
-
-
-async def test_ui_shows_how_much_of_the_glossary_reaches_the_engine(client_ready):
-    html = (await client_ready.get("/")).text
-    assert "glossary-reach" in html and "dropped-hint" in html
-    js = (await client_ready.get("/static/app.js")).text
-    texts = (await client_ready.get("/static/i18n.js")).text
-    assert "зачёркнутое движок выбросит" in texts and "все фразы дойдут до движка" in texts
-    assert "usable_count" in js and "dropped" in js
-    # Подсказка собирается из состава словаря, а не лежит готовой в разметке:
-    # «пишите по-русски» неверно для e2e_rnnt, где латиница есть.
-    assert "по-русски" in texts and "по-русски" not in html
-    assert "alphabet" in js
-
-
-async def test_edits_are_staged_until_applied(client_ready):
-    """Каждое применение перезагружает движок, поэтому правки копятся до кнопки."""
-    js = (await client_ready.get("/static/app.js")).text
-    assert 'glossaryText() === glossary.applied' in js
-    texts = (await client_ready.get("/static/i18n.js")).text
-    assert "нажмите «Применить»" in texts and 'press \u201cApply\u201d' in texts
-
-
-async def test_ui_advises_transliteration_and_never_lowercasing(client_ready):
-    """The engine retries a phrase lowercased itself, so only the alphabet is left."""
-    texts = (await client_ready.get("/static/i18n.js")).text
-    assert "опенвиспр вместо OpenWhispr" in texts
-    assert "Пишите строчными" not in texts
-
-
-async def test_glossary_is_a_field_of_chips_with_import_and_export(client_ready):
-    html = (await client_ready.get("/")).text
-    js = (await client_ready.get("/static/app.js")).text
-    for marker in ["btn-export", "glossary-file", "btn-add", "add-phrase", "tag-list"]:
-        assert marker in html
-    assert "<textarea" not in html  # список правится чипами, а не текстовым полем
-    assert "importGlossary" in js and "exportGlossary" in js and "addPhrases" in js
-    texts = (await client_ready.get("/static/i18n.js")).text
-    assert "глоссарий.txt" in texts and "glossary.txt" in texts
-
-
-async def test_a_phrase_already_in_the_list_is_not_added_twice(client_ready):
-    """Сравнение как у движка: регистр и «ё» не делают фразу новой."""
-    js = (await client_ready.get("/static/app.js")).text
-    assert 'toLowerCase().replace(/ё/g, "е")' in js
-    texts = (await client_ready.get("/static/i18n.js")).text
-    assert "уже в списке" in texts and "flashChip" in js
-
-
-async def test_dropped_phrases_are_struck_through_in_place(client_ready):
-    css = (await client_ready.get("/static/style.css")).text
-    js = (await client_ready.get("/static/app.js")).text
-    assert '.tag[data-dropped="true"] .tag-text { text-decoration: line-through' in css
-    assert "dataset.dropped" in js
-    # Отдельного свёрнутого списка отброшенных больше нет — чипы и есть список.
-    html = (await client_ready.get("/")).text
-    assert "dropped-list" not in html and "dropped-summary" not in html
-
-
-async def test_status_shows_totals_and_recent_files(client_ready):
-    html = (await client_ready.get("/")).text
-    js = (await client_ready.get("/static/app.js")).text
-    assert "ro-total" in html and "recent-rows" in html
-    assert "files, all time" in html
-    assert "файлов за всё время" in (await client_ready.get("/static/i18n.js")).text
-    assert "renderRecent" in js and "avg_elapsed_total" in js
-
-
-async def test_microphone_button_explains_itself_without_https(client_ready):
-    js = (await client_ready.get("/static/app.js")).text
-    texts = (await client_ready.get("/static/i18n.js")).text
-    assert "window.isSecureContext" in js
-    assert "только на localhost или по HTTPS" in texts
-    assert "only on localhost or over HTTPS" in texts
-
-
-async def test_page_is_revalidated_and_assets_are_fingerprinted(client_ready):
-    """Иначе после выкладки браузер держит старую разметку со свежим скриптом."""
-    response = await client_ready.get("/")
-    assert "no-cache" in response.headers.get("cache-control", "")
-    match = re.search(r'/static/app\.js\?v=([0-9a-f]{8})', response.text)
-    assert match, "ссылка на скрипт без отпечатка содержимого"
-    assert re.search(r'/static/style\.css\?v=[0-9a-f]{8}', response.text)
-    assert (await client_ready.get(f"/static/app.js?v={match.group(1)}")).status_code == 200
-
-
-async def test_deploy_sends_every_engine_field(client_ready):
-    """Иначе поля, которых нет в форме, молча берутся из старого состояния -
-    так HOTWORDS_DEFAULT=1 в .env не доходил до движка."""
-    html = (await client_ready.get("/")).text
-    js = (await client_ready.get("/static/app.js")).text
-    assert "opt-hotwords-default" in html and "opt-boost" in html
-    for field in ("hotwords_default", "hotwords_boost"):
-        assert field in js, f"deploy() не посылает {field}"
-
-
-async def test_ui_shows_env_divergence_and_offers_to_deploy_it(client_ready):
-    html = (await client_ready.get("/")).text
-    js = (await client_ready.get("/static/app.js")).text
-    assert "env-diff" in html and "btn-deploy-env" in html
-    assert "env.diverges" in js and "env_missing" in js
-    assert "btn-glossary-env" in html
-
-
-async def test_head_cards_show_badges_with_their_source(client_ready):
-    js = (await client_ready.get("/static/app.js")).text
-    css = (await client_ready.get("/static/style.css")).text
-    assert "head.badge" in js and "badge_note" in js
-    assert ".head-badge" in css
-
-
-async def test_deploy_progress_next_to_explicit_apply(client_ready):
-    """Цель и процент берутся из статуса, индикатор стоит у явной кнопки запуска."""
-    html = (await client_ready.get("/")).text
-    form = re.search(r'<form id="config-form".*?</form>', html, re.S).group()
-    assert 'id="btn-deploy" type="submit"' in form
-    assert '<progress id="deploy-progress"' in form
-    js = (await client_ready.get("/static/app.js")).text
-    assert "status.deploying" in js and "status.download_percent" in js
-    change = re.search(r'\$\("heads"\)\.onchange\s*=.*?};', js, re.S).group()
-    assert "state.selected" in change and "deploy(" not in change
-
-
-async def test_head_cards_are_built_once_and_updated_in_place(client_ready):
-    js = (await client_ready.get("/static/app.js")).text
-    assert "state.heads" in js
-    # пересборка всех карточек на каждое событие и была причиной моргания
-    assert js.count('container.textContent = ""') == 0
-
-
-async def test_busy_state_comes_from_the_server_not_the_post(client_ready):
-    """POST /api/deploy возвращает 202 сразу, а развертывание идет еще минуты."""
-    js = (await client_ready.get("/static/app.js")).text
-    assert "state.busy = true" not in js and "state.busy = false" not in js
-
-
-async def test_rollback_verdict_stays_on_the_card_that_was_clicked(client_ready):
-    """Откат кончается зелёным `ready`, а нажимали другую голову: без этой ветки о
-    неудаче говорила бы только пилюля наверху — ровно то, что мы и убирали."""
-    js = (await client_ready.get("/static/app.js")).text
-    assert "clickedTarget" in js
-    assert 'status.status === "ready" && clickedTarget' in js
-    # Откат узнается по коду статуса, а не по русскому слову в тексте: текст двуязычный.
-    assert "isRollback(status)" in js and 'indexOf("rollback.") === 0' in js
-
-
-async def test_connection_section_links_api_docs_and_models(client_ready):
-    """Схема управляющего API и список моделей - две ссылки, за которыми чаще всего
-    идут в чужую документацию вместо своей консоли."""
-    html = (await client_ready.get("/")).text
-    js = (await client_ready.get("/static/app.js")).text
-    assert 'id="link-docs"' in html and 'id="snip-models"' in html
-    assert 'id="connect-docs"' in html
-    assert "/api/docs" in js and "/v1/models" in js
-
-
-async def test_ui_offers_window_concurrency_and_names_its_condition(client_ready):
-    """Селект бесполезен без пула 2: движок берет свободный слот без ожидания, и при
-    пуле 1 параллельность молча ничего не делает. Условие должно стоять в интерфейсе."""
-    html = (await client_ready.get("/")).text
-    js = (await client_ready.get("/static/app.js")).text
-    assert "opt-window-concurrency" in html
-    texts = (await client_ready.get("/static/i18n.js")).text
-    assert "части длинной записи обрабатываются по очереди" in texts and "Unavailable with one simultaneous request" in texts
-    assert "file_window_concurrency" in js
-
-
-# --- два языка интерфейса ------------------------------------------------------
-
-
-async def test_english_is_the_default_and_russian_is_a_switch(client_ready):
-    """Английский - язык по умолчанию всегда: настройка браузера не спрашивается,
-    иначе русский посетитель никогда бы не увидел язык, на котором написан проект."""
-    html = (await client_ready.get("/")).text
-    texts = (await client_ready.get("/static/i18n.js")).text
-    assert '<html lang="en">' in html
-    assert 'data-lang="en"' in html and 'data-lang="ru"' in html
-    assert 'const DEFAULT_LANG = "en"' in texts
-    assert "navigator.language" not in texts
-    assert "localStorage" in texts  # выбор языка переживает перезагрузку
-
-
-async def test_both_languages_cover_the_same_keys(client_ready):
-    """Пропущенный ключ показал бы английскую фразу в русском интерфейсе - молча."""
-    texts = (await client_ready.get("/static/i18n.js")).text
-    blocks = re.findall(r"\n  (en|ru): \{(.*?)\n  \},", texts, re.S)
-    assert {name for name, _body in blocks} == {"en", "ru"}
-    keys = {name: set(re.findall(r'"([\w.]+)":', body)) for name, body in blocks}
-    assert keys["en"] == keys["ru"], keys["en"] ^ keys["ru"]
-    assert len(keys["en"]) > 100
-
-
-async def test_interface_strings_live_in_the_dictionary_not_in_the_code(client_ready):
-    """Половина фраз в словаре, половина в коде - и переведена будет половина."""
-    js = (await client_ready.get("/static/app.js")).text
-    # Кириллица в app.js допустима только в комментариях и в сравнении «ё» с «е».
-    code_lines = [
-        line for line in js.splitlines()
-        if re.search(r'["\'][^"\']*[А-Яа-я]', line)
-        and not line.lstrip().startswith(("//", "/*", "*"))
-        and "ё" not in line
-    ]
-    assert not code_lines, code_lines
-
-
-async def test_head_descriptions_come_translated_from_the_server(client_ready):
-    """Подписи голов живут в каталоге, поэтому язык спрашивается у сервера."""
-    js = (await client_ready.get("/static/app.js")).text
-    assert "/api/models?lang=" in js
-
-    english = (await client_ready.get("/api/models", params={"lang": "en"})).json()
-    russian = (await client_ready.get("/api/models", params={"lang": "ru"})).json()
-    unknown = (await client_ready.get("/api/models", params={"lang": "xx"})).json()
+async def test_head_descriptions_come_translated_from_the_server(client_stopped):
+    english = (await client_stopped.get("/api/models", params={"lang": "en"})).json()
+    russian = (await client_stopped.get("/api/models", params={"lang": "ru"})).json()
+    unknown = (await client_stopped.get("/api/models", params={"lang": "xx"})).json()
     by_id = {head["id"]: head for head in english["heads"]}
     assert "vocabulary" in by_id["e2e_rnnt"]["subtitle"]
     assert by_id["e2e_rnnt"]["badge"] == "low error on FLEURS ru"
     ru_by_id = {head["id"]: head for head in russian["heads"]}
     assert ru_by_id["e2e_rnnt"]["badge"] == "низкая ошибка на FLEURS ru"
-    # Названия моделей не переводятся, переводятся только пояснения.
     assert ru_by_id["e2e_rnnt"]["title"] == by_id["e2e_rnnt"]["title"]
-    assert unknown["heads"] == english["heads"]  # неизвестный язык - английский
+    assert unknown["heads"] == english["heads"]
 
 
-async def test_glossary_warnings_are_rendered_and_translated(client_ready):
-    """Коды с сервера превращаются в фразы здесь, значит нужны в обоих словарях."""
-    js = (await client_ready.get("/static/app.js")).text
-    assert 't("issue." + code' in js
-    assert 'id="glossary-issues"' in (await client_ready.get("/")).text
+async def test_web_shell_navigation_and_language_persist(chrome_page, live_client):
+    page, expect = chrome_page
+    await page.goto(str(live_client.base_url))
+    await expect(page.get_by_role("heading", name="Dictation", exact=True)).to_be_visible()
+    nav = page.locator("#railnav")
+    for route in ("dict", "compare", "benchmarks", "api", "models", "settings", "glossary", "status", "journal"):
+        await expect(nav.locator(f'a[href="#{route}"]')).to_have_count(1)
 
-    texts = (await client_ready.get("/static/i18n.js")).text
-    blocks = re.findall(r"\n  (en|ru): \{(.*?)\n  \},", texts, re.S)
-    keys = {name: set(re.findall(r'"([\w.]+)":', body)) for name, body in blocks}
-    for code in ("weight_off", "weight_ignored", "weight_invalid", "comment", "tab", "short"):
-        assert f"issue.{code}" in keys["en"]
-        assert f"issue.{code}" in keys["ru"]
+    await nav.get_by_role("link", name="WER benchmarks").click()
+    await expect(page.get_by_role("heading", name="WER benchmarks", exact=True)).to_be_visible()
+    brand = page.get_by_role("complementary").get_by_role("link", name="Kamerton ASR Console")
+    await brand.get_by_text("Kamerton", exact=True).click()
+    await expect(page.get_by_role("heading", name="Dictation", exact=True)).to_be_visible()
+    await page.go_back()
+    await expect(page.get_by_role("heading", name="WER benchmarks", exact=True)).to_be_visible()
+    await brand.press("Enter")
+    await expect(nav.get_by_role("link", name="Dictation")).to_have_attribute("aria-current", "page")
+
+    await page.get_by_role("complementary").get_by_role("radio", name="RU").click()
+    await expect(page.get_by_role("heading", name="Диктовка", exact=True)).to_be_visible()
+    await page.reload()
+    await expect(page.get_by_role("heading", name="Диктовка", exact=True)).to_be_visible()
+    await expect(page.locator("html")).to_have_attribute("lang", "ru")
 
 
-async def test_glossary_intro_states_the_selection_rule_not_the_weight_syntax(client_ready):
-    """Главное правило всех источников - добавлять только то, что движок не берёт.
+async def test_glossary_explains_active_model_support_with_empty_entries(chrome_page, live_client, monkeypatch):
+    from console.state import EngineConfig
 
-    Про вес интерфейс больше ничего не обещает: движок читает его как
-    выключатель, и старая подпись «вес подсказки» обещала силу, которой нет.
-    """
-    texts = (await client_ready.get("/static/i18n.js")).text
-    en = re.search(r'"glossary\.intro":\s*\n?\s*"([^"]*)"', texts).group(1)
-    assert "gets wrong without help" in en
-    assert "vertical bar" not in en
+    supervisor = live_client.app.state.supervisor
+    monkeypatch.setattr(supervisor, "default_config", lambda: EngineConfig(variant="t_one"))
+    page, expect = chrome_page
+    address = str(live_client.base_url) + "/#glossary"
+    await page.goto(address)
+    reach = page.locator("#glossary-reach")
+    await expect(reach).to_contain_text("does not use the glossary")
+    await expect(page.locator("#tag-list > li")).to_have_count(0)
+    monkeypatch.setattr(supervisor, "default_config", lambda: EngineConfig(variant="whisper_tiny"))
+    await page.reload()
+    await expect(reach).to_contain_text("uses the first glossary phrases as a text hint")
 
 
 async def test_mobile_feedback_and_model_list_in_chrome(live_client):
@@ -394,14 +142,57 @@ async def test_mobile_feedback_and_model_list_in_chrome(live_client):
             }""")
             await page.locator("#btn-export").click()
             await page.locator(".mobile [data-lang=en]").click()
-            await pw.expect(page.locator("#glossary-hint")).to_have_text(
-                await page.evaluate("i18n.t('glossary.empty')")
-            )
-            await nav.select_option("api")
+            await pw.expect(page.locator("#glossary-hint")).to_have_text("the glossary is empty")
             async with page.expect_request(lambda r: r.url.endswith("/v1/models")) as req:
-                await page.locator("#service-models summary").click()
+                await nav.select_option("api")
             assert await (await req.value).header_value("authorization") == "Bearer ui-test-only"
+            await page.locator("#service-models summary").click()
             await pw.expect(page.locator("#model-response")).to_contain_text('"data"')
+        finally:
+            await browser.close()
+
+
+async def test_mobile_navigation_has_visible_text_in_webkit(live_client):
+    pw = pytest.importorskip("playwright.async_api")
+    async with pw.async_playwright() as driver:
+        if not Path(driver.webkit.executable_path).is_file():
+            pytest.skip("Для проверки мобильной навигации нужен Playwright WebKit")
+        browser = await driver.webkit.launch()
+        try:
+            page = await browser.new_page(**driver.devices["iPhone 15"])
+            await page.goto(str(live_client.base_url))
+            nav = page.locator("#mobile-nav")
+            await pw.expect(nav.locator("option").first).to_have_text("Dictation")
+            screenshot = await nav.screenshot(scale="css")
+            contrast = await nav.evaluate("""async (select, encoded) => {
+                const img = new Image();
+                img.src = 'data:image/png;base64,' + encoded;
+                await img.decode();
+                const canvas = document.createElement('canvas');
+                canvas.width = img.width;
+                canvas.height = img.height;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0);
+                const background = ctx.getImageData(Math.floor(img.width / 2), 10, 1, 1).data;
+                ctx.fillStyle = getComputedStyle(select).color;
+                ctx.fillRect(0, 0, 1, 1);
+                const foreground = ctx.getImageData(0, 0, 1, 1).data;
+                function luminance([r, g, b]) {
+                    const linear = value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+                    return 0.2126 * linear(r / 255) + 0.7152 * linear(g / 255) + 0.0722 * linear(b / 255);
+                }
+                const colors = [luminance(background), luminance(foreground)];
+                return (Math.max(...colors) + 0.05) / (Math.min(...colors) + 0.05);
+            }""", base64.b64encode(screenshot).decode("ascii"))
+            assert contrast >= 4.5
+            await nav.select_option("status")
+            await pw.expect(page.locator("#storage-title")).to_be_visible()
+            await pw.expect(page.locator("#disk-free")).to_contain_text(" of ")
+            assert (await page.locator("#disk-free").text_content()).count("\u00a0") == 2
+            brand = page.locator(".mobile").get_by_role("link", name="Kamerton ASR Console")
+            await brand.locator("svg").tap()
+            await pw.expect(page.get_by_role("heading", name="Dictation", exact=True)).to_be_visible()
+            await pw.expect(nav).to_have_value("dict")
         finally:
             await browser.close()
 
@@ -419,6 +210,170 @@ async def chrome_page(live_client):
             await browser.close()
 
 
+async def test_model_catalog_groups_keep_one_choice_and_open_its_settings(chrome_page, live_client, monkeypatch):
+    monkeypatch.setattr("console.api.runtime_available", lambda *_: True)
+    page, expect = chrome_page
+    await page.goto(str(live_client.base_url) + "/#models")
+    whisper = page.locator("#models-whisper summary")
+    nvidia = page.locator("#models-parakeet summary")
+    await expect(page.locator("#target-whisper_tiny")).to_be_hidden()
+    await whisper.focus()
+    await whisper.press("Enter")
+    await nvidia.click()
+    for family, variants in {
+        "GigaAM": [
+            "rnnt", "e2e_rnnt", "e2e_rnnt_2026_10_09", "ml_ctc", "ml_ctc_large",
+            "gigaam_v4_rnnt", "gigaam_v4_ctc", "gigaam_multilingual_v2_rnnt",
+        ],
+        "Whisper": ["whisper_tiny", "whisper_small", "whisper_large_v3_turbo", "whisper_large_v3"],
+        "NVIDIA": ["parakeet_tdt_v3", "parakeet_ultra", "nemotron_35_asr"],
+        "Other": ["t_one"],
+    }.items():
+        radios = page.get_by_role("group", name=family, exact=True).get_by_role("radio")
+        await expect(radios).to_have_count(len(variants))
+        assert await radios.evaluate_all("radios => radios.map(radio => radio.value)") == variants
+    other = page.locator("#models-other summary")
+    await other.click()
+    await expect(page.locator("#target-t_one")).to_be_hidden()
+    await expect(page.locator("#target-parakeet_tdt_v3")).to_be_visible()
+    await page.locator('.lang-option[data-lang="ru"]:visible').click()
+    await expect(page.get_by_role("group", name="Другие", exact=True)).to_be_visible()
+    await expect(page.locator("#target-t_one")).to_be_hidden()
+    await other.press("Enter")
+    await expect(page.locator("#target-t_one")).to_be_visible()
+    await page.locator('.lang-option[data-lang="en"]:visible').click()
+    await whisper.press("Space")
+    await expect(page.locator("#target-whisper_tiny")).to_be_hidden()
+    await expect(page.locator("#target-parakeet_tdt_v3")).to_be_visible()
+    status = (await live_client.get("/api/status")).json()
+    async with page.expect_response(lambda response: "/api/models?lang=en" in response.url) as response:
+        live_client.app.state.bus.publish({"type": "snapshot", **status})
+    await (await response.value).finished()
+    await expect(whisper).to_be_focused()
+    await expect(page.locator("#target-whisper_tiny")).to_be_hidden()
+    await whisper.press("Enter")
+    await page.locator("#target-ml_ctc_large").check()
+    await page.locator("#target-ml_ctc_large").press("ArrowDown")
+    await expect(page.locator("#target-gigaam_v4_rnnt")).to_be_checked()
+    await expect(page.locator('#heads input:checked')).to_have_count(1)
+    await page.locator("#model-settings").click()
+    await expect(page.locator("#cfg-model")).to_have_text("GigaAM v4 RNN-T")
+    await expect(page.locator("#opt-alternate-threads")).to_be_visible()
+    await expect(page.locator("#opt-whisper-beam")).to_have_count(0)
+    await page.locator("#model-dialog-close").click()
+    await page.locator("#target-gigaam_v4_ctc").check()
+    await page.locator("#model-settings").click()
+    await expect(page.locator("#cfg-model")).to_have_text("GigaAM v4 CTC")
+    await expect(page.locator("#opt-alternate-threads")).to_be_visible()
+    await page.locator("#model-dialog-close").click()
+    await page.locator("#target-gigaam_multilingual_v2_rnnt").check()
+    await expect(page.locator("#head-languages")).to_contain_text("Kazakh")
+    await expect(page.locator("#target-gigaam_multilingual_v2_rnnt-modellang")).to_have_text("21 languages")
+    await page.locator("#target-whisper_tiny").check()
+    await page.locator("#model-settings").click()
+    await expect(page.locator("#cfg-model")).to_have_text("Whisper Tiny")
+
+
+async def test_api_catalog_deploys_missing_model_and_enables_its_id(chrome_page, live_client, monkeypatch):
+    from console.state import EngineConfig
+
+    await live_client.app.state.supervisor.deploy(EngineConfig())
+    page, expect = chrome_page
+    await page.goto(str(live_client.base_url) + "/#api")
+    picker = page.locator("#client-model-picker")
+    summary = picker.locator("summary")
+    model_id = "gigaam-multilingual-ctc"
+    row = picker.locator(f'[data-model-id="{model_id}"]')
+    choose = row.locator(".api-model-select")
+    button = row.get_by_role("button", name=f"Deploy {model_id}")
+    await expect(page.locator("#client-model")).to_have_text("gigaam-v3-rnnt")
+    await summary.press("Enter")
+    await expect(row).to_contain_text("not downloaded")
+    await expect(choose).to_be_hidden()
+    await expect(button).to_be_enabled()
+    listed = (await live_client.get("/v1/models")).json()["data"]
+    assert model_id not in {entry["id"] for entry in listed}
+    catalog = (await live_client.get("/api/models")).json()["heads"]
+    assert set(await picker.locator("li").evaluate_all("rows => rows.map(row => row.dataset.modelId)")) == {
+        head["api_id"] for head in catalog
+    } | {"kamerton"}
+
+    await button.press("Escape")
+    await expect(picker.locator("ul")).to_be_hidden()
+    await expect(summary).to_be_focused()
+    await summary.click()
+    await page.route("**/api/deploy", lambda route: route.fulfill(status=503), times=1)
+    await button.click()
+    await expect(row.get_by_role("status")).to_contain_text("503")
+    monkeypatch.setenv("FAKE_DOWNLOAD_SLOW", "0.8")
+    async with page.expect_request(lambda request: request.method == "POST" and request.url.endswith("/api/deploy")) as posted:
+        await button.click()
+    assert (await posted.value).post_data_json == {"variant": "ml_ctc"}
+    await expect(button).to_be_disabled()
+    await expect(choose).to_be_visible(timeout=15000)
+    await expect(button).to_be_hidden()
+    await choose.press("Enter")
+    await expect(picker.locator("ul")).to_be_hidden()
+    await expect(summary).to_be_focused()
+    await expect(page.locator("#snip-curl")).to_contain_text(f"model={model_id}")
+
+
+async def test_catalog_failure_stays_visible_during_status_refresh(chrome_page, live_client):
+    page, expect = chrome_page
+    await page.goto(str(live_client.base_url) + "/#models")
+    await expect(page.locator("#target-rnnt")).to_be_visible()
+    await page.route("**/api/models?*", lambda route: route.fulfill(status=503))
+    await page.locator('#railnav a[href="#dict"]').click()
+    await page.locator('#railnav a[href="#models"]').click()
+    await expect(page.locator("#catalog-message")).to_contain_text("may be out of date")
+    await expect(page.locator("#catalog-message")).to_contain_text("HTTP 503")
+    await expect(page.locator("#target-rnnt")).to_be_visible()
+    async with page.expect_response(lambda response: response.url.endswith("/api/status")) as response:
+        live_client.app.state.bus.publish({"type": "status"})
+    await (await response.value).finished()
+    await expect(page.locator("#catalog-message")).to_contain_text("may be out of date")
+    await page.unroute("**/api/models?*")
+    await page.locator("#catalog-retry").click()
+    await expect(page.locator("#catalog-notice")).to_be_hidden()
+
+
+async def test_catalog_shows_safe_deploy_rejection_and_upstream_status(chrome_page, live_client, monkeypatch):
+    from console.downloader import DownloadError
+    from console.state import EngineConfig
+
+    monkeypatch.setattr("console.api.runtime_available", lambda *_: True)
+    supervisor = live_client.app.state.supervisor
+    await supervisor.deploy(EngineConfig())
+    page, expect = chrome_page
+    await page.goto(str(live_client.base_url) + "/#models")
+    await page.locator("#models-whisper summary").click()
+    await page.locator("#target-whisper_tiny").check()
+    await page.locator("#model-settings").click()
+    await page.route("**/api/deploy", lambda route: route.fulfill(status=409, json={
+        "error": {"code": "runtime_unavailable", "message": "Private diagnostic"},
+    }), times=1)
+    await page.locator("#btn-deploy").click()
+    message = "The selected engine is unavailable in this installation."
+    await expect(page.locator("#deploy-feedback")).to_have_text(message)
+    await page.locator('#model-dialog-close').click()
+    error = page.locator("#target-whisper_tiny-modelerror")
+    await expect(error).to_have_text(message)
+    await page.locator("#models-whisper summary").click()
+    await expect(error).to_be_hidden()
+
+    async def limited(*args):
+        raise DownloadError("http", "Private diagnostic", 69, 429)
+
+    monkeypatch.setattr("console.supervisor.download", limited)
+    monkeypatch.setattr("console.supervisor.DOWNLOAD_RETRY_DELAYS", ())
+    await page.locator("#model-settings").click()
+    await page.locator("#btn-deploy").click()
+    await page.locator('#model-dialog-close').click()
+    await expect(error).to_have_text("The weights server is limiting requests (HTTP 429). Try again later.")
+    await expect(error).to_be_visible()
+    await expect(page.locator("#target-rnnt-modelstate")).to_have_text("active · downloaded")
+
+
 async def test_stop_after_failed_deploy_and_retry_in_chrome(chrome_page, live_client, monkeypatch):
     from console.state import EngineConfig
 
@@ -429,8 +384,9 @@ async def test_stop_after_failed_deploy_and_retry_in_chrome(chrome_page, live_cl
     monkeypatch.setenv("FAKE_DOWNLOAD_SLOW", "0.6")
     monkeypatch.setenv("FAKE_DOWNLOAD_FAIL", "disk")
     await page.locator("#target-ml_ctc").check()
-    await page.locator('[data-page=models] a[href="#settings"]').click()
+    await page.locator('#model-settings').click()
     await page.locator("#btn-deploy").click()
+    await page.locator('#model-dialog-close').click()
     await page.locator('#railnav a[href="#status"]').click()
     await expect(page.locator("#state-pill")).to_have_attribute("data-state", "downloading")
     stop = page.locator("#btn-stop")
@@ -438,6 +394,14 @@ async def test_stop_after_failed_deploy_and_retry_in_chrome(chrome_page, live_cl
     await expect(page.locator("#state-pill")).to_have_attribute("data-state", "error")
     await expect(stop).to_be_visible()
     await expect(stop).to_be_enabled()
+    await page.locator('#railnav a[href="#models"]').click()
+    await expect(page.locator("#target-ml_ctc-modelerror")).to_contain_text("write the model to disk")
+    await expect(page.locator("#target-rnnt-modelstate")).to_have_text("active · downloaded")
+    await expect(page.locator("#target-rnnt-modelerror")).to_be_empty()
+    await page.locator("#target-e2e_rnnt").check()
+    await expect(page.locator("#target-ml_ctc-modelerror")).to_be_visible()
+    await expect(page.locator("#target-e2e_rnnt-modelerror")).to_be_empty()
+    await page.locator('#railnav a[href="#status"]').click()
     await page.route("**/api/stop", lambda r: r.fulfill(status=503, body="Unavailable"), times=1)
     feedback = page.locator("#stop-feedback")
     await stop.click()
@@ -445,7 +409,7 @@ async def test_stop_after_failed_deploy_and_retry_in_chrome(chrome_page, live_cl
     async with page.expect_response(lambda r: r.url.endswith("/api/status")):
         pass  # Ждём следующего штатного опроса.
     await expect(feedback).to_contain_text("503")
-    await page.locator(".rail [data-lang=ru]").click()
+    await page.get_by_role("complementary").get_by_role("radio", name="RU").click()
     await expect(feedback).to_have_text("Не удалось остановить движок. Ошибка 503")
     await stop.click()
     await expect(page.locator("#state-pill")).to_have_attribute("data-state", "stopped")
@@ -471,6 +435,39 @@ async def test_bearer_switch_discards_manual_copy_in_chrome(chrome_page, live_cl
     assert "Authorization" not in await manual.input_value()
 
 
+async def test_superseded_clipboard_write_does_not_open_manual_copy(chrome_page, live_client):
+    page, expect = chrome_page
+    await page.add_init_script("""window.clipboardWrites = [];
+        Object.defineProperty(navigator, 'clipboard', {value: {
+            writeText: () => new Promise((resolve, reject) => clipboardWrites.push({resolve, reject}))
+        }});""")
+    await page.goto(str(live_client.base_url) + "/#api")
+    await page.locator('[data-target="snip-curl"]').click()
+    await page.locator('[data-target="snip-py"]').click()
+    await page.evaluate("""() => {
+        clipboardWrites[0].reject(new DOMException('Cancelled', 'NotAllowedError'));
+        clipboardWrites[1].resolve();
+    }""")
+    await expect(page.locator("#live")).to_have_text("Copied")
+    await expect(page.locator(".manual")).to_have_count(0)
+
+
+async def test_glossary_enter_waits_for_input_composition(chrome_page, live_client):
+    page, expect = chrome_page
+    await page.goto(str(live_client.base_url) + "/#glossary")
+    phrase = page.locator("#add-phrase")
+    tags = page.locator("#tag-list .tag-text")
+    candidate = "日本語"
+    await phrase.fill(candidate)
+    for event in ({"isComposing": True}, {"isComposing": False, "keyCode": 229}):
+        await phrase.dispatch_event("keydown", {"key": "Enter", "cancelable": True, **event})
+        await expect(phrase).to_have_value(candidate)
+        await expect(tags).to_have_count(0)
+    await phrase.press("Enter")
+    await expect(tags).to_have_text([candidate])
+    await expect(phrase).to_have_value("")
+
+
 async def test_deployment_dependencies_and_old_defaults_in_chrome(chrome_page, live_client):
     from console.state import EngineConfig
 
@@ -478,7 +475,8 @@ async def test_deployment_dependencies_and_old_defaults_in_chrome(chrome_page, l
     supervisor = live_client.app.state.supervisor
     await supervisor.deploy(EngineConfig(variant="rnnt", punctuation="off", itn="on", pool_size=4,
                                          file_window_concurrency=3, hotwords_default=True, hotwords_boost=4.25))
-    await page.goto(str(live_client.base_url) + "/#settings")
+    await page.goto(str(live_client.base_url) + "/#models")
+    await page.locator("#model-settings").click()
     pool, windows = page.locator("#opt-pool"), page.locator("#opt-window-concurrency")
     await expect(windows).to_have_value("3")
     await expect(page.locator("#opt-boost")).to_have_value("4.25")
@@ -493,17 +491,20 @@ async def test_deployment_dependencies_and_old_defaults_in_chrome(chrome_page, l
     await page.locator("#opt-hotwords-default").select_option("false")
     await expect(page.locator("#opt-boost")).to_be_disabled()
     for lang, note in [("ru", "Недоступно"), ("en", "Unavailable")]:
+        await page.locator('#model-dialog-close').click()
         await page.locator(f'.lang-option[data-lang="{lang}"]:visible').click()
+        await page.locator('#model-settings').click()
         await expect(page.locator("#window-note")).to_contain_text(note)
         await expect(page.locator("#boost-note")).to_contain_text(note)
-    for variant in ("e2e_rnnt", "ml_ctc", "ml_ctc_large", "rnnt"):
-        await page.locator('.cfghead a[href="#models"]').click()
+    for variant in ("e2e_rnnt", "e2e_rnnt_2026_10_09", "ml_ctc", "ml_ctc_large", "rnnt"):
+        await page.locator('#model-dialog-close').click()
         await page.locator("#target-" + variant).check()
-        await page.locator('[data-page=models] a[href="#settings"]').click()
+        await page.locator('#model-settings').click()
         await expect(page.locator("#opt-punctuation")).to_be_enabled()
         await expect(page.locator("#opt-itn")).to_be_enabled()
         await expect(page.locator("#punctuation-note")).to_contain_text({
-            "rnnt": "Auto runs", "e2e_rnnt": "already adds", "ml_ctc": "CTC", "ml_ctc_large": "CTC",
+            "rnnt": "Auto runs", "e2e_rnnt": "already adds", "e2e_rnnt_2026_10_09": "already adds",
+            "ml_ctc": "CTC", "ml_ctc_large": "CTC",
         }[variant])
     async with page.expect_request(lambda r: r.method == "POST" and r.url.endswith("/api/deploy")) as posted:
         await page.locator("#btn-deploy").click()
@@ -524,7 +525,7 @@ async def test_env_deploy_uses_exact_snapshot_and_rejects_conflict(chrome_page, 
     settings.pool_size, settings.file_window_concurrency = 1, 2
     requests = []
     page.on("request", lambda req: requests.append(req.post_data_json) if req.url.endswith("/api/deploy") else None)
-    await page.goto(str(live_client.base_url) + "/#settings")
+    await page.goto(str(live_client.base_url) + "/#models")
     env = page.locator("#btn-deploy-env")
     await expect(env).to_be_visible()
     await expect(env).to_be_disabled()
@@ -536,13 +537,17 @@ async def test_env_deploy_uses_exact_snapshot_and_rejects_conflict(chrome_page, 
     settings.file_window_concurrency = 1
     await page.reload()
     await expect(env).to_be_enabled()
+    await page.locator('#model-settings').click()
     await expect(page.locator("#opt-boost")).to_be_disabled()
     await page.locator("#opt-punctuation").select_option("on")
+    await page.locator('#model-dialog-close').click()
     await page.route("**/api/deploy", lambda r: r.fulfill(status=503), times=1)
     await env.click()
     await expect(page.locator("#env-error")).to_contain_text("503")
+    await page.locator('#model-settings').click()
     await expect(page.locator("#opt-punctuation")).to_have_value("on")
     await expect(page.locator("#draft-note")).not_to_be_empty()
+    await page.locator('#model-dialog-close').click()
     await env.click()
     await wait_for(lambda: supervisor.status == "ready" and supervisor.current and supervisor.current.hotwords_boost == 8)
     assert requests == [supervisor.env_config().to_dict()] * 2
@@ -554,10 +559,14 @@ async def test_microphone_and_selected_filename_in_chrome(chrome_page, live_clie
 
     page, expect = chrome_page
     await live_client.app.state.supervisor.deploy(EngineConfig())
+    await page.emulate_media(reduced_motion="no-preference")
     await page.goto(str(live_client.base_url))
     await page.locator("#btn-record").click()
     # Реальный AudioWorklet получает кадры виртуального устройства Chrome, а не пользовательского микрофона.
-    await page.wait_for_function("state.recording?.chunks.reduce((n, a) => n + a.length, 0) >= 8000")
+    await page.wait_for_function("""() => {
+        const meter = document.getElementById("meter");
+        return !meter.hidden && meter.getContext("2d").getImageData(440, 32, 1, 1).data[3] > 0;
+    }""")
     await page.locator("#btn-record").click()
     await expect(page.locator("#result")).to_be_visible()
     await page.locator("#file-mode").click()
@@ -584,8 +593,16 @@ async def test_compare_switch_without_engine_restart_in_chrome(chrome_page, live
     await supervisor.deploy(EngineConfig(variant="e2e_rnnt"))
     pid = supervisor.process.pid
     origin = str(live_client.base_url)
-    await page.goto(origin + "/#compare")
+    await page.goto(origin + "/#settings")
     toggle = page.locator("#compare-enabled")
+    nav = page.locator("#mobile-nav")
+
+    async def section(name):
+        if await nav.is_visible():
+            await nav.select_option(name)
+        else:
+            await page.locator(f'#railnav a[href="#{name}"]').click()
+
     await expect(page.locator("#compare-toggle-note")).to_contain_text("without access protection")
     await expect(toggle).to_be_disabled()
     live_client.app.state.settings.api_key = "ui-synthetic-local"
@@ -601,9 +618,10 @@ async def test_compare_switch_without_engine_restart_in_chrome(chrome_page, live
     async with page.expect_request(lambda r: r.method == "PUT" and r.url.endswith("/api/settings/compare")) as sent:
         await toggle.check()
     assert (await sent.value).post_data_json == {"enabled": True}
-    await expect(page.locator("#compare-form")).to_be_visible()
     await page.reload()
     await expect(toggle).to_be_checked()
+    await section("compare")
+    await expect(page.locator("#compare-form")).to_be_visible()
     await page.locator("#compare-file").set_input_files({"name": "comparison.wav", "mimeType": "audio/wav", "buffer": wav_bytes()})
     await page.locator("#btn-compare").click()
     await expect(page.locator("#compare-results .panel")).to_have_count(2)
@@ -616,7 +634,10 @@ async def test_compare_switch_without_engine_restart_in_chrome(chrome_page, live
             if folder := os.environ.get("KAMERTON_UI_ARTIFACTS"):
                 Path(folder).mkdir(parents=True, exist_ok=True)
                 await page.screenshot(path=Path(folder) / f"compare-{width}-{lang}.png")
+    await section("settings")
     await toggle.uncheck()
+    await expect(toggle).not_to_be_checked()
+    await section("compare")
     await expect(page.locator("#compare-form")).to_be_hidden()
     await expect(page.locator("#compare-results .panel")).to_have_count(0)
     assert not supervisor.compare_enabled and supervisor.process.pid == pid
@@ -627,10 +648,15 @@ async def test_compare_switch_without_engine_restart_in_chrome(chrome_page, live
     record = tmp_path / "synthetic-compare-started.jsonl"
     cli_env = compare._cli_env() | {"FAKE_COMPARE_RECORD": str(record), "FAKE_COMPARE_DELAY": "0.5"}
     monkeypatch.setattr(compare, "_cli_env", lambda: cli_env.copy())
+    await section("settings")
     await toggle.check()
+    await section("compare")
     await page.locator("#btn-compare").click()
     await wait_for(record.exists)
+    await section("settings")
     await toggle.uncheck()
+    await expect(toggle).not_to_be_checked()
+    await section("compare")
     await expect(page.locator("#compare-form")).to_be_hidden()
     await expect(page.locator("#compare-results .panel")).to_have_count(2)
     assert not supervisor.compare_enabled and supervisor.process.pid == pid

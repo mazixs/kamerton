@@ -12,7 +12,7 @@ You need Git, Python 3.10+ and a local Docker Engine for Linux containers with C
 
 **Windows with Docker Desktop:** use an Ubuntu terminal in WSL 2, not PowerShell. In Docker Desktop, enable the WSL 2 backend and **Settings → Resources → WSL Integration** for Ubuntu. Run `cd ~` in Ubuntu before cloning. Keep the checkout and any `--root` directory on the Linux filesystem, not `/mnt/c`, so the owner database and private files use Linux permissions.
 
-In Bash, clone a revision containing `scripts/kamerton.py`: `git clone https://github.com/mazixs/stt-api.git && cd stt-api`.
+In Bash, clone a revision containing `scripts/kamerton.py`: `git clone https://github.com/mazixs/kamerton.git && cd kamerton`.
 
 **Already have a working installation?** Go to [migration](#migrate-an-existing-stack), not `init` or `setup`. By default, the CLI writes into the checkout. For a separate empty installation directory, pass `--root` before the command on every invocation. Do not run direct `docker compose up` against the CLI installation's directories: it starts a separate project.
 
@@ -58,11 +58,11 @@ To test the HTTPS client yourself, put `recording.wav` in the current directory.
 
 ```bash
 read -r -p 'Base URL (including /v1): ' base_url
-read -r -s -p 'Client API key: ' STT_API_KEY; printf '\n'
+read -r -s -p 'Client API key: ' KAMERTON_API_KEY; printf '\n'
 curl --fail-with-body "${base_url%/}/audio/transcriptions" \
-  --header "Authorization: Bearer $STT_API_KEY" \
+  --header "Authorization: Bearer $KAMERTON_API_KEY" \
   --form-string 'model=kamerton' --form 'file=@recording.wav'
-unset STT_API_KEY
+unset KAMERTON_API_KEY
 ```
 
 **Ready when:** the console or client returns text from your recording. `kamerton` is a stable ID; the active model is changed in the console, not by changing the client model field.
@@ -84,7 +84,7 @@ unset STT_API_KEY
 
 Use the repository-relative Compose path that matches the route. For the external proxy, select **`docker-compose.npm.yml`**, a standalone file; **`docker-compose.yml`** by itself is the local profile. **Don't select `docker-compose.public.yml` by itself**: it's a Caddy overlay that needs the base file. Run Caddy from a checkout with the CLI unless your deployment explicitly supplies both files to Compose.
 
-- **Check build source.** A [Git Sync](https://getarcane.app/docs/docker/git-sync) can copy only the Compose YAML into Arcane's project directory. For NPM, make the matching full source available as the build context (including `Dockerfile`, `console/`, and dependencies), or set `KAMERTON_BUILD_CONTEXT` to a Git context pinned to the intended release tag or full commit SHA. The builder must be able to fetch it. Arcane may rename the Compose file in its project directory; don't rely on the source filename being present there.
+- **Check build source.** A [Git Sync](https://getarcane.app/docs/docker/git-sync) can copy only the Compose YAML into Arcane's project directory. For NPM, make the matching full source available as the build context (including `Dockerfile`, `backend/`, `frontend/`, and dependencies), or set `KAMERTON_BUILD_CONTEXT` to a Git context pinned to the intended release tag or full commit SHA. The builder must be able to fetch it. Arcane may rename the Compose file in its project directory; don't rely on the source filename being present there.
 - **Set the project environment in Arcane.** In single-file mode, set the values from [`.env.npm.example`](../.env.npm.example) in the GitOps environment; Arcane doesn't read `.env.npm` automatically. Use absolute `KAMERTON_DATA_DIR` and `KAMERTON_MODEL_DIR` paths on the Docker host. Don't point `COMPOSE_FILE` or `COMPOSE_ENV_FILES` at repository files that aren't present.
 - **Build and verify the intended image.** Set `KAMERTON_IMAGE` to a distinct local tag for that version and pin `KAMERTON_BUILD_CONTEXT` to the matching source. A Git Sync doesn't guarantee a rebuild of an existing local image just because the context changed. If in doubt, build explicitly as below and verify that Arcane uses the same tag.
 - **Auto Sync off is not a lock.** It stops scheduled pulls; a manual **Sync from Git** can still replace the YAML and redeploy a running stack. Test in a separate project, with different ports and data/model paths, before syncing an existing installation.
@@ -92,15 +92,17 @@ Use the repository-relative Compose path that matches the route. For the externa
 On the Docker host, work in the actual Arcane project directory. Use [the one-file Arcane helper](../scripts/arcane.sh), which needs Bash and Python 3 but no Python packages. If you cloned the repository elsewhere, adjust the script path below. Each command asks for the local Docker context, Compose project name, effective YAML and a private env file with the same settings as Arcane. It refuses `DOCKER_HOST` and remote contexts rather than falling back to a different daemon.
 
 ```bash
-bash "$HOME/stt-api/scripts/arcane.sh" check
-bash "$HOME/stt-api/scripts/arcane.sh" build
+bash "$HOME/kamerton/scripts/arcane.sh" check
+bash "$HOME/kamerton/scripts/arcane.sh" build
 ```
 
 `check` is read-only: compare its Engine ID, mount paths, port and origin with Arcane's actual configuration. `build` asks for confirmation and builds the image without starting the service. **For an existing stack**, verify the original directories and `owner.sqlite3` are present. Do not create empty replacements or initialize an owner.
 
-**For a new stack only**, create the two verified bind directories on the Docker host (`mkdir -p` with those absolute paths), then run `bash "$HOME/stt-api/scripts/arcane.sh" create-owner`. The helper requires an empty data directory, including hidden files, and prompts for the password without echoing it. It will not convert a stopped local installation into an owner installation. Start the web service **in Arcane**, not through the installer.
+**For a new stack only**, create the two verified bind directories on the Docker host (`mkdir -p` with those absolute paths), then run `bash "$HOME/kamerton/scripts/arcane.sh" create-owner`. The helper requires an empty data directory, including hidden files, and prompts for the password without echoing it. It will not convert a stopped local installation into an owner installation. Start the web service **in Arcane**, not through the installer.
 
 ## Migrate an existing stack
+
+New installations use the Kamerton service name. The CLI continues to use the pinned service name and templates for existing installations. For a manual rename, bring down the previous Compose stack using its original configuration before starting the renamed one on the same data directories. In the Caddy profile, reuse the existing project name or explicitly migrate its named certificate volumes.
 
 The installer doesn't import existing Compose stacks or switch an installation's profile. Keep control of the live stack with its current manager while you prepare and test the target separately.
 
@@ -109,6 +111,8 @@ The installer doesn't import existing Compose stacks or switch an installation's
 3. **Switch one instance at a time.** Stop the old service before starting the new service on the original data. Never run two processes on one `data/` directory. Reuse an existing `owner.sqlite3`; don't run `init` or bootstrap a new owner over it. Verify login, microphone and a real client transcription via HTTPS before declaring the switch complete. To revert, stop the new service, restore the matching old configuration and data if needed, then start only the old service and return the proxy to it.
 
 ## Troubleshooting
+
+For recovery after host reboots and persistent logs, see [Running Kamerton behind a reverse proxy on Linux](reliability.md).
 
 | Symptom | Check first |
 |---|---|

@@ -1,0 +1,7 @@
+.rack .modes {flex-wrap:wrap}
+.rack .modes button[data-state="on"] {background:var(--accent); color:var(--accent-foreground)}
+.rack #diarization-option {width:auto}
+.copy-control {min-inline-size:0}
+.copy-control > .small {margin-inline-start:.35rem}
+.result .copy-control {max-inline-size:100%}
+.result .copy-control .manual {min-inline-size:min(16rem,100%)}

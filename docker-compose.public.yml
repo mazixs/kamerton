@@ -1,8 +1,8 @@
 # Наложение к docker-compose.yml. Инструкция: docs/public-access.md.
 services:
-  stt-api:
+  kamerton:
     container_name: !reset null
-    image: ${KAMERTON_IMAGE:-stt-api-console:owner}
+    image: ${KAMERTON_IMAGE:-kamerton:owner}
     ports: !reset []
     # Старый .env может содержать API_KEY или пароль: не загружаем его в контейнер.
     env_file: !reset []
@@ -28,7 +28,7 @@ services:
       target: caddy
     restart: unless-stopped
     depends_on:
-      stt-api:
+      kamerton:
         condition: service_healthy
     environment:
       KAMERTON_DOMAIN: ${KAMERTON_DOMAIN:?Set KAMERTON_DOMAIN}
@@ -45,7 +45,7 @@ services:
 
   owner-cli:
     profiles: [setup]
-    image: ${KAMERTON_IMAGE:-stt-api-console:owner}
+    image: ${KAMERTON_IMAGE:-kamerton:owner}
     pull_policy: never
     entrypoint: ["python", "-m", "console.owner_cli"]
     command: ["--help"]

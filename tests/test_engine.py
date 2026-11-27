@@ -1,7 +1,10 @@
 import asyncio
+import socket
 
+import httpx
 import pytest
 
+from console.downloader import engine_command
 from console.engine import EngineProcess, EngineStartupError, build_argv
 from console.state import EngineConfig
 
@@ -74,6 +77,31 @@ async def test_start_then_healthy_then_stop(console_settings):
     assert proc.is_running is False
 
 
+async def test_alternate_engine_health_uses_a_free_loopback_port(console_settings, monkeypatch):
+    selected_port = None
+
+    def fake_alternate(settings, config, *, alternate_port=None):
+        nonlocal selected_port
+        assert config.variant == "whisper_tiny"
+        assert alternate_port is not None and alternate_port != settings.engine_port
+        selected_port = alternate_port
+        return build_argv(settings.model_copy(update={"engine_port": alternate_port}), cfg())
+
+    monkeypatch.setattr("console.engine.build_argv", fake_alternate)
+    proc = EngineProcess(console_settings)
+    # Имитируем порт GigaSTT, который еще нельзя занять после переключения.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as unavailable:
+        unavailable.bind(("127.0.0.1", console_settings.engine_port))
+        unavailable.listen()
+        try:
+            await proc.start(cfg(variant="whisper_tiny"))
+            assert proc.base_url == f"http://127.0.0.1:{selected_port}"
+            assert (await proc.wait_healthy(timeout=10))["status"] == "ok"
+        finally:
+            await proc.stop()
+    assert proc.base_url == console_settings.engine_base_url
+
+
 async def test_health_returns_none_when_not_running(console_settings):
     proc = EngineProcess(console_settings)
     assert await proc.health() is None
@@ -123,6 +151,25 @@ async def test_logs_forwarded_to_callback(console_settings):
     await proc.wait_healthy(timeout=20)
     await wait_for(lambda: any("listening" in line for line in lines), timeout=10)
     await proc.stop()
+
+
+async def test_alternate_engine_prints_startup_diagnostics_without_request_output(console_settings, monkeypatch):
+    def fake_argv(settings, config, *, alternate_port):
+        return engine_command(settings, "serve", "--port", str(alternate_port))
+
+    monkeypatch.setattr("console.engine.build_argv", fake_argv)
+    lines: list[str] = []
+    proc = EngineProcess(console_settings, on_log=lines.append)
+    await proc.start(cfg(variant="whisper_tiny"))
+    try:
+        await wait_for(lambda: any(line.startswith("[whisper_tiny]") and "listening" in line for line in lines))
+        await proc.wait_healthy(timeout=20)
+        async with httpx.AsyncClient(trust_env=False) as client:
+            response = await client.get(proc.base_url + "/private-request-canary")
+        assert response.status_code == 404
+    finally:
+        await proc.stop()
+    assert not any("private-request-canary" in line for line in lines)
 
 
 async def test_reload_calls_engine_admin_endpoint(console_settings):

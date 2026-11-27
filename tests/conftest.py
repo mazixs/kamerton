@@ -187,7 +187,10 @@ async def live_client(console_settings):
     app = create_app(console_settings)
     port = free_port()
     server = uvicorn.Server(
-        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", lifespan="off")
+        uvicorn.Config(
+            app, host="127.0.0.1", port=port, log_level="warning", lifespan="off",
+            timeout_graceful_shutdown=2,
+        )
     )
     task = asyncio.create_task(server.serve())
     while not server.started:

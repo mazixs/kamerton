@@ -63,6 +63,9 @@
 
 ## Пакет RNN-T от 9 октября: совместимость проверена отдельно
 
+26.11.2026 октябрьский `e2e_rnnt` добавлен как явная ревизия в Камертоне.
+Результат парного прогона и порядок хранения весов описаны в [отдельном отчете](e2e-rnnt-june-october.md).
+
 В GitHub Releases у июньского и октябрьского пакета одинаковые имена файлов, но разные SHA-256 энкодеров. Сопоставление с инвентаризацией установленных весов 20.11 показывает, что используемые RNN-T-энкодеры соответствуют **июньскому** выпуску; октябрьский в этой инвентаризации не обнаружен. Энкодеры `ml_ctc` (`e08e27ae…`) и `ml_ctc_large` (`b2ad9c38…`) совпали с [контрольными суммами релизного загрузчика][ctc-assets].
 
 | Энкодер | 22 июня — 225 250 603 байта (≈215 МиБ) | 9 октября — 319 665 270 байт (≈305 МиБ) |
@@ -162,15 +165,15 @@ curl -fsS -H 'Content-Type: application/octet-stream' --data-binary @golos_00.wa
 [ctc-confirm]: https://github.com/ekhodzitsky/gigastt/blob/90fd3607f5e9ad84c5a7896f8d209b4fb5475309/docs/stream-ctc-confirmation.md#L34-L49
 [g726]: https://github.com/ekhodzitsky/gigastt/blob/90fd3607f5e9ad84c5a7896f8d209b4fb5475309/docs/api.md#L830-L839
 [speaker-model]: https://huggingface.co/onnx-community/wespeaker-voxceleb-resnet34-LM/blob/6a61a1833ff2583aabeba044f5c8221f00b67ceb/onnx/model.onnx
-[app-engine]: ../../console/engine.py
-[app-state]: ../../console/state.py
-[app-supervisor]: ../../console/supervisor.py
-[app-api]: ../../console/api.py
-[app-catalog]: ../../console/catalog.py
-[app-proxy]: ../../console/proxy.py
-[app-ui]: ../../console/static/app.js
-[app-main]: ../../console/main.py
-[app-vocab]: ../../console/vocab.py
+[app-engine]: ../../backend/console/engine.py
+[app-state]: ../../backend/console/state.py
+[app-supervisor]: ../../backend/console/supervisor.py
+[app-api]: ../../backend/console/api.py
+[app-catalog]: ../../backend/console/catalog.py
+[app-proxy]: ../../backend/console/proxy.py
+[app-ui]: ../../frontend/src/app/console-provider.jsx
+[app-main]: ../../backend/console/main.py
+[app-vocab]: ../../backend/console/vocab.py
 [gguf-rnnt]: https://huggingface.co/handy-computer/gigaam-v3-rnnt-gguf/blob/bbaea47d3e7b1bfa702ac050127cd93ff778837d/gigaam-v3-rnnt-Q8_0.gguf
 [gguf-e2e]: https://huggingface.co/handy-computer/gigaam-v3-e2e-rnnt-gguf/blob/b9b68a835993df09018237a11d2a9b8c1925844d/gigaam-v3-e2e-rnnt-Q8_0.gguf
 [load-files]: https://github.com/ekhodzitsky/gigastt/blob/f4add258610c3b1c3971e6e0e5e3ab3bfac818ed/crates/gigastt-core/src/inference/load_files.rs#L65-L112

@@ -1,4 +1,4 @@
-# В образ попадают только requirements.txt и console/ — остальное лишь утяжеляет
+# В образ попадают зависимости, backend/ и сборка frontend/.
 # контекст сборки, а секреты и веса ему вообще незачем видеть.
 .git/
 .gitignore
@@ -17,6 +17,8 @@ data/
 models/
 **/data/
 **/models/
+!frontend/src/features/models/
+!frontend/src/features/models/**
 *.wav
 *.webm
 *.mp3
@@ -31,6 +33,8 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+**/node_modules/
+**/dist/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/

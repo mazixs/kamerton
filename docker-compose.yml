@@ -1,12 +1,14 @@
+name: kamerton
 services:
-  stt-api:
+  kamerton:
     build:
       context: .
+      target: ${KAMERTON_BUILD_TARGET:-standard}
       args:
         # Keep the direct-build default in Dockerfile in sync.
         GIGASTT_TAG: ${GIGASTT_TAG:-2.22.0}
-    image: stt-api-console:latest
-    container_name: stt-api
+    image: kamerton:latest
+    container_name: kamerton
     # Reap the engine if the console exits unexpectedly.
     init: true
     # Allow for Uvicorn's 15s request drain and engine cleanup.

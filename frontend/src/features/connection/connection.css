@@ -1,0 +1,9 @@
+[data-layout~="api-model-field"] #client-model-list button {
+  inline-size: auto;
+  min-inline-size: 0;
+}
+
+[data-layout~="api-model-field"] #client-model-list .api-model-select {
+  justify-content: start;
+  white-space: normal;
+}

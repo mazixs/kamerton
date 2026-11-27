@@ -5,6 +5,7 @@ import httpx
 import pytest
 from conftest import wait_for
 
+from console.errors import ApiError
 from console.state import EngineConfig, State, StateFile
 from console.supervisor import Supervisor
 
@@ -26,6 +27,21 @@ async def supervisor(console_settings, bus):
         yield sup
     finally:
         await sup.shutdown()
+
+
+async def test_standard_build_restores_unavailable_model_without_downloading(console_settings, bus, monkeypatch):
+    console_settings.autostart = True
+    StateFile(console_settings.state_path).save(State(desired=cfg(variant="whisper_tiny")))
+
+    async def unexpected_download(*args):
+        pytest.fail("attempted to download a model without its runtime")
+
+    monkeypatch.setattr("console.supervisor.download", unexpected_download)
+    supervisor = Supervisor(console_settings, bus)
+    await supervisor.restore_on_boot()
+    assert supervisor.status == "error"
+    assert supervisor.detail_code == "deploy.runtime_unavailable"
+    assert supervisor.desired.variant == "whisper_tiny"
 
 
 async def test_deploy_downloads_starts_and_reaches_ready(supervisor, console_settings):
@@ -253,6 +269,33 @@ async def test_stop_engine_persists_stopped_status(supervisor, console_settings)
     assert supervisor.status == "stopped"
     assert supervisor.process.is_running is False
     assert StateFile(console_settings.state_path).load().status == "stopped"
+
+
+async def test_stop_interrupts_a_switch_waiting_for_inference(supervisor, monkeypatch):
+    await supervisor.deploy(cfg())
+    monkeypatch.setattr(supervisor, "model_available", lambda variant: True)
+
+    async def switch_models():
+        async with supervisor.inference_access("e2e_rnnt"):
+            pytest.fail("queued request entered inference while stopping")
+
+    async with supervisor.inference_access():
+        switching = asyncio.create_task(switch_models())
+        try:
+            await wait_for(supervisor._lock.locked)
+            await asyncio.wait_for(supervisor.stop_engine(), timeout=5)
+            assert supervisor.status == "stopped"
+            assert not supervisor.process.is_running
+            with pytest.raises(ApiError) as stopped:
+                await switching
+            assert stopped.value.code == "engine_not_ready"
+        finally:
+            if not switching.done():
+                switching.cancel()
+                await asyncio.gather(switching, return_exceptions=True)
+
+    await supervisor.deploy(cfg())
+    assert supervisor.status == "ready"
 
 
 async def test_shutdown_does_not_trigger_watchdog(supervisor):

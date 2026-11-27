@@ -129,13 +129,19 @@ class Console:
             raise RuntimeError(f"развернуто не то, что просили: {mismatched}")
         return engine
 
-    def transcribe(self, path: Path) -> dict[str, Any]:
+    def transcribe(self, path: Path, *, language: str | None = None) -> dict[str, Any]:
         with path.open("rb") as handle:
             response = self.client.post(
-                f"{self.url}/api/test", files={"file": (path.name, handle, "application/octet-stream")}
+                f"{self.url}/api/test",
+                params={"use_cache": "false"},
+                files={"file": (path.name, handle, "application/octet-stream")},
+                **({"data": {"language": language}} if language else {}),
             )
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        if result.get("cached"):
+            raise RuntimeError("Сервер вернул результат из кеша. Обновите Камертон для замера инференса.")
+        return result
 
 
 def collect_audio(items: list[str]) -> list[Path]:
@@ -174,7 +180,7 @@ def command_run(args: argparse.Namespace) -> int:
         for path in files:
             best: dict[str, Any] | None = None
             for _ in range(args.repeat):
-                result = console.transcribe(path)
+                result = console.transcribe(path, language=args.language) if args.language else console.transcribe(path)
                 if best is None or result["elapsed"] < best["elapsed"]:
                     best = result
             assert best is not None
@@ -198,6 +204,8 @@ def command_run(args: argparse.Namespace) -> int:
             "console_version": console_version(console.url, console.client),
             "records": records,
         }
+        if args.language:
+            payload["language"] = args.language
     finally:
         console.close()
 
@@ -497,6 +505,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--audio", nargs="+", required=True, help="каталог или список файлов")
     run.add_argument("--label", required=True, help="имя прогона: так назовется json")
     run.add_argument("--repeat", type=int, default=3, help="прогонов на файл, берется лучшее")
+    run.add_argument("--language", help="код языка запроса, например ru; без флага работает настройка движка")
     run.add_argument("--deploy", default="", help='тело POST /api/deploy, например {"variant":"e2e_rnnt"}')
     run.set_defaults(func=command_run)
 

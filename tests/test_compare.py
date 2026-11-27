@@ -7,8 +7,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from console import compare, state
-from console.catalog import HEADS
+from console import catalog, compare, state
+from console.catalog import HEADS, OCTOBER_E2E, head_directory
 from console.main import create_app
 from console.state import EngineConfig
 from conftest import wait_for, wav_bytes
@@ -34,6 +34,32 @@ def install(settings, *variants):
             (settings.model_dir / name).write_bytes(b"existing weights")
 
 
+async def test_compare_distinguishes_two_revisions_of_the_same_engine_head(client_stopped, fake_cli, monkeypatch):
+    settings = await enable(client_stopped)
+    install(settings, "e2e_rnnt")
+    october = head_directory(OCTOBER_E2E, settings.model_dir)
+    october.mkdir()
+    assets = {}
+    for name in HEADS[OCTOBER_E2E].files:
+        payload = b"october"
+        (october / name).write_bytes(payload)
+        assets[name] = (len(payload), hashlib.sha256(payload).hexdigest())
+    monkeypatch.setattr(catalog, "OCTOBER_E2E_ASSETS", assets)
+    prior_stage = compare._stage_head
+    sources = []
+
+    def stage(source, target, variant):
+        sources.append(source)
+        return prior_stage(source, target, variant)
+
+    monkeypatch.setattr(compare, "_stage_head", stage)
+    response = await submit(client_stopped, a="e2e_rnnt", b=OCTOBER_E2E)
+    assert response.status_code == 200, response.text
+    assert [item["variant"] for item in response.json()["results"]] == ["e2e_rnnt", OCTOBER_E2E]
+    assert sources == [settings.model_dir.resolve(), october.resolve()]
+    assert [row["variant"] for row in fake_cli[1]() if row["phase"] == "start"] == ["e2e_rnnt", "e2e_rnnt"]
+
+
 async def submit(client, *, a="rnnt", b="e2e_rnnt", audio=AUDIO, headers=AUTH):
     return await client.post(
         "/api/compare", headers=headers, data={"variant_a": a, "variant_b": b},
@@ -45,6 +71,14 @@ def error(response, status, code):
     assert response.status_code == status, response.text
     assert response.json()["error"]["code"] == code
     assert KEY not in response.text and FILE not in response.text
+
+
+async def test_single_engine_mode_rejects_compare_while_service_is_running(client_ready, children):
+    settings = await enable(client_ready)
+    settings.compare_single_engine = True
+    response = await submit(client_ready)
+    error(response, 409, "compare_stop_engine")
+    assert not children
 
 
 @pytest.fixture
@@ -608,17 +642,19 @@ async def test_disabling_allows_started_compare_to_finish(client_stopped, fake_c
         await asyncio.gather(first, return_exceptions=True)
 
 
-async def test_startup_removes_only_its_stale_compare_directory(console_settings, tmp_path, monkeypatch):
+@pytest.mark.parametrize("prefix", ["kamerton", "stt-api"])
+async def test_startup_removes_only_its_stale_compare_directory(console_settings, tmp_path, monkeypatch, prefix):
     settings = console_settings.model_copy(update={
         "enable_model_compare": True, "api_key": KEY, "autostart": False,
     })
     monkeypatch.setattr(compare.tempfile, "gettempdir", lambda: str(tmp_path))
-    root = compare._temp_root(settings)
+    current_root = compare._temp_root(settings)
+    root = current_root.with_name(current_root.name.replace("kamerton-", f"{prefix}-", 1))
     root.mkdir(mode=0o700)
     leftovers = root / "aborted-job"
     leftovers.mkdir()
     (leftovers / "audio").write_bytes(AUDIO)
-    other = tmp_path / "stt-api-compare-other"
+    other = tmp_path / f"{prefix}-compare-other"
     other.mkdir()
     neighbor = other / "keep"
     neighbor.write_bytes(b"other console")

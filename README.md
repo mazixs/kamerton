@@ -13,12 +13,17 @@ languages. The browser remembers the choice.*
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue)](pyproject.toml)
 [![Docker](https://img.shields.io/badge/docker-compose-blue)](docker-compose.yml)
 
-Inside are the [GigaAM v3](https://github.com/salute-developers/GigaAM) model by
+The standard image contains the [GigaAM v3](https://github.com/salute-developers/GigaAM) model by
 SberDevices and the [gigastt](https://github.com/ekhodzitsky/gigastt) engine: a single
 Rust binary on ONNX Runtime, INT8, CPU only. No PyTorch, no ffmpeg, no CUDA; the image
 is about 340 MB. The engine version is pinned in `GIGASTT_TAG`, and the number itself
 lives in [`docker-compose.yml`](docker-compose.yml) - it is not repeated here so the
 two cannot drift apart.
+
+The optional [multi-engine build](docs/multiengine.md) adds Whisper Tiny, Small,
+Large V3 and Turbo, Parakeet V3 and Ultra, Nemotron 3.5 ASR, and T-one. Parakeet,
+Nemotron ASR and T-one support optional speaker labels on uploaded recordings.
+The [GigaAM v4 profile](docs/multiengine.md#gigaam-v4) adds Russian and English RNN-T and CTC recognition on CPU, plus GigaAM Multilingual v2 RNN-T.
 
 ![Kamerton: dictation and its transcript](docs/console.png)
 
@@ -58,21 +63,28 @@ Both HTTPS routes support an owner login and separate, revocable API keys for ap
   example and a link to Swagger UI. You can change the address in the examples.
 - **Journal** shows recent deployment and engine events. It holds up to 200
   entries in memory and starts fresh when the console process restarts.
+- **Service status** shows disk space for the model directory, service data and
+  the visible container filesystem.
 - **Compare** runs two already downloaded models on one file, one after the
   other, without switching the model that serves the API. The owner can turn
   comparison on or off without restarting; the local profile needs a non-empty
   `API_KEY`. Turning it off prevents new runs without interrupting a run already
   in progress. Deployment and recovery take priority and can interrupt that run.
-  Each run uses separate processes and shares CPU and memory with the live model.
-  Timing includes loading the weights, not uploading the file. VAD, the glossary,
-  and separate punctuation and number-normalization passes are off; formatting
-  built into the model remains.
+  Stop the live engine before a comparison involving an additional runtime, or
+  when single-engine mode is enabled. Timing includes engine startup and model
+  loading. In GigaSTT comparisons, external punctuation, ITN, VAD and the glossary
+  are off. Other engines use their own processing.
 
 [Screenshot: two models transcribing the same recording](docs/console-compare.png)
 
 ## Which model to pick
 
 The default image uses gigastt `2.22.0`. See the [engine and model compatibility report (in Russian)](docs/research/gigastt-compatibility.md) for the checked version, weights, and supported options.
+
+The Models page lists both revisions of the end-to-end head. `e2e_rnnt` uses the June
+weights. Deploying `e2e_rnnt_2026_10_09` downloads the October release into its own
+subdirectory and verifies each file with SHA-256. Once downloaded, both revisions are
+available on the Compare page. [Paired benchmark (in Russian)](docs/research/e2e-rnnt-june-october.md)
 
 | Model | Languages | Punctuation | Our WER, FLEURS ru | 165 s of audio | Badge |
 |---|---|---|--:|--:|---|
@@ -84,7 +96,7 @@ The default image uses gigastt `2.22.0`. See the [engine and model compatibility
 WER is our own measurement from 11.08.2026 on 300 Russian FLEURS phrases; the timing
 is one dictation file on a 16-core desktop CPU, best of three runs.
 
-**Take `e2e_rnnt`.** It is more accurate than the rest and the only one able to write
+**Take `e2e_rnnt` for Russian dictation.** The end-to-end head is able to write
 what a glossary is full of: capitals, Latin script, digits and hyphens. The `rnnt`
 vocabulary holds only 32 lowercase Cyrillic letters, so "OpenWhispr" cannot be
 produced at all. Out of the 140 phrases in our production glossary, `e2e_rnnt` can
@@ -154,10 +166,21 @@ with open("recording.wav", "rb") as audio:
     print(client.audio.transcriptions.create(model="kamerton", file=audio).text)
 ```
 
-Use `model=kamerton` in new clients. `GET /v1/models` lists that one stable ID;
-its `variant` reports the head actually running in the console, or `null` if
-none is running. Older IDs such as `whisper-1` and `gigaam-v3-rnnt` still work;
-no value of `model` switches the deployed head.
+Read the downloaded model IDs from `GET /v1/models` and send one in the
+`model` field. For example, send `model=gigaam-v3-rnnt` to load GigaAM RNNT
+when its weights are present. A request that switches models waits for the
+current responses, then starts the requested model. The last model stays warm
+for subsequent requests. The console's saved startup configuration stays in
+effect for server restarts. `kamerton` and `whisper-1` select the running model.
+
+The **API connection** page provides examples for the selected ID and an
+English setup prompt you can copy into an AI coding assistant.
+An unknown ID returns `404 model_not_found`. A missing model or runtime returns
+`404 model_not_available`. If the requested model fails to start, the API returns
+`503 model_start_failed` and tries to restore the previous engine. Automatic
+replacement of a running GigaSTT process returns `409 model_switch_jobs_enabled`
+in a local installation with native jobs enabled, because those jobs live in
+the process's memory.
 
 Supported: `response_format` = `json`, `text`, `srt`, `vtt`, `verbose_json`;
 `timestamp_granularities[]` (or `timestamp_granularities`) = `word` and/or
@@ -186,7 +209,7 @@ key. Comparison also requires an explicit opt-in.
 | Path | Behind the key | What it does |
 |---|---|---|
 | `POST /v1/audio/transcriptions` | yes | Recognition, OpenAI-compatible |
-| `GET /v1/models` | yes | Stable `kamerton` model ID and current head (`variant`) |
+| `GET /v1/models` | yes | Downloaded model IDs and the `kamerton` alias while a model is running |
 | `POST /v1/audio/translations` | yes | Always `400`: GigaAM does not translate speech |
 | `GET/POST/DELETE /v1/...` | yes | Passthrough for the engine's remaining native endpoints |
 | `GET /api/status`, `/api/models`, `/api/glossary` | yes | Data for the web console |
@@ -354,26 +377,28 @@ this project; the binary comes from the upstream image.
 
 | File | Responsibility |
 |---|---|
-| `console/main.py` | Application assembly: `Settings` -> `Supervisor` -> FastAPI, three routers, and static files with a content fingerprint in their URLs |
-| `console/supervisor.py` | State machine (`stopped` / `downloading` / `starting` / `ready` / `error`), rollback to the last working configuration, watchdog for a crashed process, `.env` mismatch |
-| `console/engine.py` | Lifecycle of `gigastt serve`: the only place where engine arguments are assembled |
-| `console/downloader.py` | Weight downloads through the engine's own command, with its progress and checksums |
-| `console/api.py` | The console's control API under `/api`, including the `env` block in the status |
-| `console/proxy.py` | The OpenAI facade: key, size limit, clear errors when not ready, timing. The upload body reaches the engine byte for byte |
-| `console/auth.py` | `Authorization: Bearer` check, disabled when `API_KEY` is empty |
-| `console/state.py` | `data/state.json`, written atomically: a container killed mid-write leaves no fragment behind |
-| `console/catalog.py` | The four heads: names, sizes, weight files, and badges from our own measurement |
-| `console/vocab.py` | Reads a head's vocabulary from disk and answers which glossary phrases the engine can write |
-| `console/glossary.py` | Parses the phrase list into the engine's format (`data/hotwords.txt`) |
-| `console/events.py` | The event bus behind SSE on `/api/events` |
-| `console/metrics.py` | Counters in `data/metrics.json` |
-| `console/wavinfo.py`, `console/webminfo.py` | Duration of WAV and WebM/Opus without decoding - only for RTF, the audio is untouched |
-| `console/static/` | Frontend with no build step and no dependencies. Microphone recordings are assembled into WAV in the browser, which is why the image needs no ffmpeg |
+| `backend/console/main.py` | Application assembly: `Settings` -> `Supervisor` -> FastAPI, three routers, and static files with a content fingerprint in their URLs |
+| `backend/console/supervisor.py` | State machine (`stopped` / `downloading` / `starting` / `ready` / `error`), rollback to the last working configuration, watchdog for a crashed process, `.env` mismatch |
+| `backend/console/engine.py` | Lifecycle of `gigastt serve`: the only place where engine arguments are assembled |
+| `backend/console/downloader.py` | Weight downloads through the engine's own command, with its progress and checksums |
+| `backend/console/api.py` | The console's control API under `/api`, including the `env` block in the status |
+| `backend/console/proxy.py` | The OpenAI facade: key, size limit, clear errors when not ready, timing. The upload body reaches the engine byte for byte |
+| `backend/console/auth.py` | `Authorization: Bearer` check, disabled when `API_KEY` is empty |
+| `backend/console/state.py` | `data/state.json`, written atomically: a container killed mid-write leaves no fragment behind |
+| `backend/console/catalog.py` | Model names, revisions, sizes, weight files, and badges from our own measurements |
+| `backend/console/vocab.py` | Reads a head's vocabulary from disk and answers which glossary phrases the engine can write |
+| `backend/console/glossary.py` | Parses the phrase list into the engine's format (`data/hotwords.txt`) |
+| `backend/console/events.py` | The event bus behind SSE on `/api/events` |
+| `backend/console/metrics.py` | Counters in `data/metrics.json` |
+| `backend/console/wavinfo.py`, `backend/console/webminfo.py` | Duration of WAV and WebM/Opus without decoding - only for RTF, the audio is untouched |
+| `frontend/` | React Native Web, shadcn/ui and Vite. Docker copies the compiled files into the FastAPI image. See the [frontend guide](frontend/README.md) |
 
 ## Development
 
 ```sh
 uv sync          # environment
+npm --prefix frontend ci
+npm --prefix frontend run build
 uv run pytest    # tests; the engine is stubbed out, nothing is downloaded
 ```
 
@@ -385,7 +410,7 @@ uv export --locked --no-dev --no-emit-project --no-header --no-annotate -o requi
 
 The export includes exact runtime versions and file hashes. The test suite checks for drift.
 
-The development overlay runs directly through Compose, not through the installer. Use a separate checkout and an unused `HOST_PORT` if a CLI-managed installation already exists. Never run these commands against the installer's own data: Compose would start a second project using the same `data/` and `models/`. The development container uses the `stt-api-local` name and does not restart after reboot.
+The development overlay runs directly through Compose, not through the installer. Use a separate checkout and an unused `HOST_PORT` if a CLI-managed installation already exists. Never run these commands against the installer's own data: Compose would start a second project using the same `data/` and `models/`. The development container uses the `kamerton-local` name and does not restart after reboot.
 
 ```sh
 cp .env.local.example .env.local
@@ -394,7 +419,7 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml down    # do no
 ```
 
 Releases are tagged `vX.Y.Z`; what went into each is in [CHANGELOG.md](CHANGELOG.md).
-The number lives in `console/__init__.py`, and both `pyproject.toml` and the schema at
+The number lives in `backend/console/__init__.py`, and both `pyproject.toml` and the schema at
 `/api/openapi.json` read it from there.
 
 To measure a new head or a new engine version, use [`bench/`](bench/README.md): two

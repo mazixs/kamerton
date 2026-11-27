@@ -1,0 +1,60 @@
+/* Доступ владельца использует те же поля, кнопки и палитру, что и рабочая консоль. */
+.login-header {display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:1rem; padding:1rem var(--gutter); background:var(--rail); color:white}
+.login-header :focus-visible {outline-color:var(--signal)}
+[data-layout~="login-main"],[data-layout~="session-check"],main[data-layout~="login-main"] {inline-size:min(100%,32rem); margin-inline:auto; padding:clamp(2rem,7vh,5rem) var(--gutter)}
+[data-layout~="login-main"] form {gap:1.15rem; border:1px solid var(--line)}
+.login-page [data-layout~="brand"] {font-size:1.35rem}
+[data-layout~="session-check"] button {margin-block-start:.85rem}
+#key-list {list-style:none; padding:0; overflow-wrap:anywhere}
+#key-list:empty {display:none}
+#key-list li {padding-block:.75rem; border-block-start:1px solid var(--line)}
+#key-list li:last-child {padding-block-end:0}
+#key-list code {font-size:var(--meta); color:var(--sub)}
+#key-form :is(.help,[data-type~="help"]) {margin-block-start:-.45rem}
+dialog {margin:auto; color:var(--ink); background:var(--paper); inline-size:min(calc(100% - 2rem),30rem); max-block-size:calc(100% - 2rem); border:1px solid var(--edge); border-radius:.375rem; padding:var(--pad); overscroll-behavior:contain; overflow-wrap:anywhere}
+dialog::backdrop {background:rgb(25 27 26 / .57)}
+dialog [data-layout~="actions"] {margin:0}
+:is(.copy-row,[data-layout~="copy-row"]) {display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:.5rem}
+:is(.copy-row,[data-layout~="copy-row"]) code {padding:.65rem; min-inline-size:0; border-radius:.25rem; background:var(--bg); font: .9rem/1.5 var(--mono); user-select:all}
+.credentials {display:grid; gap:1rem}
+.credentials dt,.setting label,#tags>label {font-weight:600}
+.credentials dt {margin-block-end:.35rem}
+dialog::backdrop {overflow:hidden; overscroll-behavior:contain}
+#base-url {font: .9rem/1.5 var(--mono)}
+.source-kind {display:block; color:var(--sub)}
+.setting {display:grid; align-content:start; gap:.35rem}
+.setting:has(:disabled) label {color:var(--sub)}
+.setting :is(select,input):disabled {background:#eff0ed; border:1px dashed var(--edge); color:#5a5c59; opacity:1; cursor:not-allowed}
+.setting :is(.help,[data-type~="help"]) {font-size:.875rem}
+.cfgfields :is(.stack,[data-layout~="stack"]) {gap:1.25rem}
+.preferences {display:grid; gap:1.4rem; max-inline-size:50rem}
+[data-layout~="preferences-section"] {gap:.55rem; border-block-start:1px solid var(--line); padding-block-start:1rem}
+[data-layout~="preferences-section"] h2 {font-size:1.125rem}
+[data-layout~="preferences-section"] .setting {justify-items:start}
+[data-layout~="preferences-section"] .check {margin:0}
+#model-dialog {inline-size:min(calc(100% - 2rem),58rem)}
+#model-dialog[data-alternate] {inline-size:min(calc(100% - 2rem),34rem)}
+#model-dialog [data-layout~="cfghead"] {margin:0; align-items:start}
+#model-dialog-title {font-size:1.2rem}
+#model-dialog .cfgfields {gap:1rem; padding-block:.8rem}
+#model-dialog .cfgfields :is(.stack,[data-layout~="stack"]) {gap:.75rem}
+#model-dialog fieldset legend {font-size:1rem}
+#model-dialog #deploy-feedback {margin:0}
+@media(min-width:53em){
+  #model-dialog #config-editor {grid-template-columns:repeat(3,minmax(0,1fr))}
+}
+#tags {gap:.4rem}
+.tag-entry {max-inline-size:38rem}
+#tag-list:not(:empty) {margin-block-start:.7rem; max-block-size:min(48dvh,31rem); overflow-y:auto; align-content:start; scrollbar-gutter:stable; overscroll-behavior-y:contain; padding:.4rem; border:1px solid var(--line); border-radius:.3rem}
+.tag-text {min-inline-size:0}
+@media(max-width:34em){
+  [data-layout~="cfghead"] {align-items:flex-start}
+  :is(.copy-row,[data-layout~="copy-row"]) {gap:.4rem}
+  :is(.copy-row,[data-layout~="copy-row"]) button {inline-size:var(--control); padding:0}
+  :is(.copy-row,[data-layout~="copy-row"]) button span {display:none}
+  #tag-list:not(:empty) {display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,7rem),1fr)); scrollbar-gutter:auto}
+  .tag {justify-content:space-between; padding-inline-start:.35rem; gap:.15rem}
+  .tag-remove {min-width:2rem}
+}
+#owner-logout {flex-shrink:0}
+@media(max-width:34em){.login-header {padding-block:.65rem}main[data-layout~="login-main"] {padding-block:2rem}}
