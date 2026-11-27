@@ -7,7 +7,7 @@ export function LanguageSwitch({ lang, t, changeLanguage }) {
     <ToggleGroup className="lang" type="single" value={lang} onValueChange={changeLanguage} aria-label={t("lang.label")}>
       {languages.map(language => (
         <ToggleGroupItem key={language} value={language} data-lang={language} lang={language}
-          className={language === lang ? "lang-option on" : "lang-option"}>
+          className="lang-option">
           {language.toUpperCase()}
         </ToggleGroupItem>
       ))}

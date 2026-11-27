@@ -39,6 +39,13 @@ summary {align-content:center; font-weight:600}
 input[type=checkbox] {flex:none; margin:0; inline-size:1.25rem; block-size:1.25rem; accent-color:var(--accent)}
 :is(a,button,input,select,textarea,summary):focus-visible {outline:3px solid var(--focus); outline-offset:3px}
 [data-layout~="rail"] :focus-visible,.mobile :focus-visible,.rack :focus-visible {outline-color:var(--signal)}
+.lang {display:flex; align-items:center; gap:2px}
+.lang .lang-option {min-block-size:2.5rem; min-inline-size:2rem; padding:.35rem .45rem; background:var(--rail); border-color:transparent; color:var(--signal); font:600 .8125rem var(--mono)}
+.lang .lang-option:enabled:hover {background:var(--display); border-color:var(--edge); color:white}
+.lang .lang-option[aria-checked=true] {background:var(--signal); border-color:var(--signal); color:var(--rail)}
+@media (forced-colors: active) {
+  .lang .lang-option[aria-checked=true] {border-color:Highlight}
+}
 .skip {position:fixed; inset:.5rem auto auto .5rem; z-index:9; padding:.6rem 1rem; background:white}
 .skip:not(:focus) {clip-path:inset(50%); inline-size:1px; block-size:1px; overflow:hidden; white-space:nowrap}
 .defs {position:absolute; width:0; height:0; overflow:hidden; pointer-events:none}

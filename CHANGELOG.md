@@ -12,6 +12,11 @@ at `/api/openapi.json` (`info.version`) read it from there.
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-11-27
+
+- Fixed the language switch contrast on the sign-in page and unified its selected state with the console.
+- Исправлен контраст переключателя языка на странице входа. Выбранный язык теперь выделен одинаково на странице входа и в консоли.
+
 ## [1.7.0] - 2026-11-27
 
 ### English
@@ -278,7 +283,8 @@ fixes, not construction.
 - Licensed under Apache 2.0; the repository history begins with a single commit made
   when the sources were opened.
 
-[Unreleased]: https://github.com/mazixs/kamerton/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/mazixs/kamerton/compare/v1.7.1...HEAD
+[1.7.1]: https://github.com/mazixs/kamerton/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/mazixs/kamerton/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/mazixs/kamerton/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/mazixs/kamerton/compare/v1.4.0...v1.5.0

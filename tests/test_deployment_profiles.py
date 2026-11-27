@@ -198,5 +198,31 @@ async def test_browser_loads_native_stylesheet_with_public_csp(engine, live_clie
                 assert re.fullmatch(r"/static/assets/react-native-web-[\w-]{8}\.css", href or "")
                 assert await sheet.evaluate("link => link.sheet.cssRules.length > 4")
                 assert await page.evaluate("window.styleViolations") == []
+
+                switch = page.locator('[data-slot="toggle-group"].lang:visible')
+                languages = switch.get_by_role("radio")
+                await pw.expect(languages).to_have_count(2)
+                contrast = await languages.evaluate_all("""items => {
+                    function luminance(color) {
+                        const [r, g, b] = color.match(/\\d+/g).map(channel => {
+                            const value = Number(channel) / 255;
+                            return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+                        });
+                        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                    }
+                    return items.map(item => {
+                        const {color, backgroundColor} = getComputedStyle(item);
+                        const [dark, light] = [luminance(color), luminance(backgroundColor)].sort((a, b) => a - b);
+                        return (light + 0.05) / (dark + 0.05);
+                    });
+                }""")
+                assert min(contrast) >= 4.5, (path, contrast)
+                english = switch.get_by_role("radio", name="EN")
+                russian = switch.get_by_role("radio", name="RU")
+                await russian.click()
+                await pw.expect(russian).to_have_attribute("aria-checked", "true")
+                await pw.expect(english).to_have_attribute("aria-checked", "false")
+                await english.click()
+                await pw.expect(english).to_have_attribute("aria-checked", "true")
         finally:
             await browser.close()
