@@ -58,7 +58,8 @@ def model(config, **kwargs):
 def mounts(service):
     for volume in service["volumes"]:
         assert volume["type"] == "bind"
-        assert volume["bind"]["create_host_path"] is False
+        # Compose versions can omit the default false in normalized JSON.
+        assert volume.get("bind", {}).get("create_host_path", False) is False
     return {volume["target"]: Path(volume["source"]) for volume in service["volumes"]}
 
 
