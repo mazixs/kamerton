@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python and browser tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: '0.13.4'
+          python-version: '3.13'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: hashFiles('frontend/package-lock.json') != ''
+        with:
+          node-version: '24'
+      - name: Build web assets
+        if: hashFiles('frontend/package-lock.json') != ''
+        run: |
+          npm --prefix frontend ci --no-audit --no-fund
+          npm --prefix frontend run build
+      - name: Install Playwright browsers
+        run: uv run --locked --with playwright==1.65.2 playwright install --with-deps chromium webkit
+      - name: Run tests
+        run: uv run --locked --with playwright==1.65.2 python -m pytest -q -ra
+
+  docker:
+    name: Docker build and installer smoke test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: '0.13.4'
+          python-version: '3.13'
+      - name: Build the default application image
+        run: docker build --tag kamerton:ci .
+      - name: Test installation against Docker
+        env:
+          KAMERTON_INSTALL_TEST_IMAGE: kamerton:ci
+        run: uv run --locked python -m pytest -q tests/test_install_cli_docker.py
