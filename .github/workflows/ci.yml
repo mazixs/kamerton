@@ -37,7 +37,7 @@ jobs:
       - name: Install Playwright browsers
         run: uv run --locked --with playwright==1.65.2 playwright install --with-deps chromium webkit
       - name: Run tests
-        run: uv run --locked --with playwright==1.65.2 pytest -q -ra
+        run: uv run --locked --with playwright==1.65.2 python -m pytest -q -ra
 
   docker:
     name: Docker build and installer smoke test
@@ -56,4 +56,4 @@ jobs:
       - name: Test installation against Docker
         env:
           KAMERTON_INSTALL_TEST_IMAGE: kamerton:ci
-        run: uv run --locked pytest -q tests/test_install_cli_docker.py
+        run: uv run --locked python -m pytest -q tests/test_install_cli_docker.py
