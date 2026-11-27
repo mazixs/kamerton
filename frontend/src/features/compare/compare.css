@@ -1,0 +1,6 @@
+#compare-form [data-slot="native-select-wrapper"] {width:100%}
+#compare-results [data-slot="card-header"],
+#compare-results [data-slot="card-content"],
+#compare-results [data-slot="card-footer"] {padding-inline:0; min-inline-size:0}
+#compare-results [data-slot="card-header"] {inline-size:100%}
+.compare-result-content {display:grid; gap:.6rem; width:100%; overflow-wrap:anywhere}

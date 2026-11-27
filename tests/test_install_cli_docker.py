@@ -62,7 +62,7 @@ def test_docker_env_backup_and_drift_refusal(installation):
     env.write_text(original, encoding="utf-8")
     cli(root, "doctor")
     cli(root, "start")
-    name = project + "-stt-api-1"
+    name = project + "-kamerton-1"
     before = json.loads(docker("container", "inspect", name))[0]
     assert {"API_KEY=synthetic$a$$b$", "HF_TOKEN=${NO_ENV_MERGE}"} <= set(before["Config"]["Env"])
     with urlopen(f"http://127.0.0.1:{port}/health", timeout=10) as response:

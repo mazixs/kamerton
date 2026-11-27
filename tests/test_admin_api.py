@@ -5,6 +5,10 @@ from unittest.mock import AsyncMock
 import pytest
 from conftest import _client, wav_bytes, wait_for
 
+from console.catalog import OCTOBER_E2E, head_directory
+from console.engine import build_argv
+from console.state import EngineConfig
+
 AUDIO = {"file": ("a.wav", wav_bytes(seconds=2), "audio/wav")}
 
 
@@ -56,15 +60,58 @@ async def test_status_shape_when_ready(client_ready):
     assert body["engine"]["running"] is True
 
 
+@pytest.mark.parametrize("variant, mode", [
+    ("rnnt", "hotwords"), ("whisper_tiny", "prompt"), ("parakeet_ultra", "unsupported"),
+    ("nemotron_35_asr", "unsupported"), ("t_one", "unsupported"),
+])
+async def test_glossary_reports_selected_runtime_support(client_stopped, monkeypatch, variant, mode):
+    supervisor = client_stopped.app.state.supervisor
+    monkeypatch.setattr(supervisor, "default_config", lambda: EngineConfig(variant=variant))
+    saved = await client_stopped.post("/api/glossary", json={"text": "Камертон"})
+    assert saved.json()["mode"] == mode
+    glossary = (await client_stopped.get("/api/glossary")).json()
+    assert glossary["mode"] == mode
+    assert glossary["variant"] == variant
+    if mode != "hotwords":
+        assert glossary["usable_count"] is None
+        assert not glossary["dropped"]
+
+
 async def test_models_marks_downloaded_and_deployed(client_ready):
     heads = (await client_ready.get("/api/models")).json()["heads"]
-    assert len(heads) == 4
+    assert len(heads) == 5
     rnnt = next(head for head in heads if head["id"] == "rnnt")
+    assert rnnt["api_id"] == "gigaam-v3-rnnt"
     assert rnnt["downloaded"] is True
     assert rnnt["deployed"] is True
     assert rnnt["native_punctuation"] is False
+    assert rnnt["runtime"] == "gigastt"
+    assert rnnt["installed_bytes"] > 0
     e2e = next(head for head in heads if head["id"] == "e2e_rnnt")
+    assert e2e["api_id"] == "gigaam-v3-e2e-rnnt"
     assert e2e["downloaded"] is False and e2e["deployed"] is False
+    october = next(head for head in heads if head["id"] == OCTOBER_E2E)
+    assert october["downloaded"] is False and october["deployed"] is False
+
+
+async def test_storage_separates_weights_data_and_free_space(client_stopped):
+    settings = client_stopped.app.state.settings
+    settings.model_dir.mkdir(parents=True, exist_ok=True)
+    with (settings.model_dir / "weight.bin").open("wb") as file:
+        file.write(b"a" * 4096)
+    result = await client_stopped.get("/api/storage")
+    assert result.status_code == 200
+    body = result.json()
+    assert body["models"]["bytes"] >= 4096
+    assert 0 < body["models"]["free_bytes"] <= body["models"]["total_bytes"]
+    assert body["data"]["bytes"] >= 0
+    assert "container_root_bytes" in body
+
+
+async def test_deploy_rejects_whisper_in_standard_image(client_stopped):
+    result = await client_stopped.post("/api/deploy", json={"variant": "whisper_tiny"})
+    assert result.status_code == 409
+    assert result.json()["error"]["code"] == "runtime_unavailable"
 
 
 async def test_deploy_switches_head(client_ready):
@@ -72,6 +119,22 @@ async def test_deploy_switches_head(client_ready):
     assert response.status_code == 202
     assert response.json()["config"]["variant"] == "e2e_rnnt"
     await wait_engine(client_ready, "e2e_rnnt")
+
+
+async def test_october_deploy_preserves_the_console_id_and_uses_its_own_weights(client_stopped, monkeypatch):
+    async def download_revision(settings, variant, on_event):
+        assert variant == OCTOBER_E2E
+        assert head_directory(variant, settings.model_dir) != settings.model_dir
+
+    monkeypatch.setattr("console.supervisor.download", download_revision)
+    response = await client_stopped.post("/api/deploy", json={"variant": OCTOBER_E2E})
+    assert response.status_code == 202
+    await wait_engine(client_stopped, OCTOBER_E2E)
+    assert (await client_stopped.get("/api/glossary")).json()["variant"] == OCTOBER_E2E
+    settings = client_stopped.app.state.settings
+    argv = build_argv(settings, EngineConfig(variant=OCTOBER_E2E))
+    assert argv[argv.index("--model-variant") + 1] == "e2e_rnnt"
+    assert argv[argv.index("--model-dir") + 1] == str(settings.model_dir / OCTOBER_E2E)
 
 
 async def test_deploy_accepts_option_overrides(client_stopped):

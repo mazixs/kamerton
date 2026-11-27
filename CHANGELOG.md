@@ -7,17 +7,27 @@ major number, new capabilities the minor, fixes the patch.
 This file records *what* shipped in each version. *Why* it was done that way lives in
 [docs/decisions.md](docs/decisions.md) (in Russian) and is not duplicated here.
 
-The version number lives in `console/__init__.py`; both `pyproject.toml` and the schema
+The version number lives in `backend/console/__init__.py`; both `pyproject.toml` and the schema
 at `/api/openapi.json` (`info.version`) read it from there.
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-11-27
+
 ### English
 
+- Rebuilt the web console with React Native Web, Vite and shadcn/ui. Added grouped model cards, deployment details, dictation history and a [WER benchmark](docs/research/human-reference-wer.md) covering 21 configurations.
+- Added optional [inference profiles](docs/multiengine.md) for Whisper, Parakeet, Nemotron ASR, T-One, GigaAM v4 and GigaAM Multilingual v2. The standard image still supports GigaSTT without the optional runtimes.
+- API clients can select downloaded models using `model` in transcription requests. The server serializes model switches, and existing clients can continue to use `kamerton`. API keys have no model binding.
+- Added a bounded [transcription cache](docs/transcription-cache.md), per-engine runtime settings and diarizer deployment status. Added an optional [systemd recovery service](docs/reliability.md) for Compose installations.
 - New [manual installation guide](docs/install.md) and deployment CLI for three setups: localhost, an existing HTTPS proxy, or bundled Caddy. The standalone NPM Compose file publishes one configurable HTTP port (8812 by default); it does not start Caddy or claim ports 80 and 443. The CLI remembers the installation profile for subsequent starts, backups and version updates.
 
 ### Русский
 
+- Консоль перенесена на React Native Web, Vite и shadcn/ui. Добавлены группы моделей, подробности развертывания, история диктовки и [бенчмарк WER](docs/research/human-reference-wer.md) по 21 конфигурации.
+- Добавлены необязательные [профили инференса](docs/multiengine.md) для Whisper, Parakeet, Nemotron ASR, T-One, GigaAM v4 и GigaAM Multilingual v2. Стандартный образ поддерживает GigaSTT без дополнительных движков.
+- Клиенты API могут выбирать скачанную модель через поле `model`. Сервер переключает модели по очереди, а ID `kamerton` остается совместимым со старыми клиентами. Ключи API больше не привязаны к модели.
+- Добавлены [кэш распознавания](docs/transcription-cache.md) с лимитом, настройки движков и статус развертывания диаризатора. Для Compose предусмотрен необязательный [сервис восстановления systemd](docs/reliability.md).
 - Добавлены [руководство по ручной установке](docs/install.ru.md) и скрипт для трёх вариантов: на своём компьютере, за существующим HTTPS-прокси или с Caddy. Отдельный Compose для NPM публикует один настраиваемый HTTP-порт (по умолчанию 8812), не запускает Caddy и не занимает 80/443. Скрипт сохраняет выбранный профиль для следующих запусков, резервного копирования и обновления версии.
 
 ## [1.6.0] - 2026-11-20
@@ -268,12 +278,13 @@ fixes, not construction.
 - Licensed under Apache 2.0; the repository history begins with a single commit made
   when the sources were opened.
 
-[Unreleased]: https://github.com/mazixs/stt-api/compare/v1.6.0...HEAD
-[1.6.0]: https://github.com/mazixs/stt-api/compare/v1.5.0...v1.6.0
-[1.5.0]: https://github.com/mazixs/stt-api/compare/v1.4.0...v1.5.0
-[1.4.0]: https://github.com/mazixs/stt-api/releases/tag/v1.4.0
-[1.3.0]: https://github.com/mazixs/stt-api/releases/tag/v1.3.0
-[1.2.0]: https://github.com/mazixs/stt-api/releases/tag/v1.2.0
-[1.1.1]: https://github.com/mazixs/stt-api/releases/tag/v1.1.1
-[1.1.0]: https://github.com/mazixs/stt-api/releases/tag/v1.1.0
-[1.0.0]: https://github.com/mazixs/stt-api/releases/tag/v1.0.0
+[Unreleased]: https://github.com/mazixs/kamerton/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/mazixs/kamerton/compare/v1.6.0...v1.7.0
+[1.6.0]: https://github.com/mazixs/kamerton/compare/v1.5.0...v1.6.0
+[1.5.0]: https://github.com/mazixs/kamerton/compare/v1.4.0...v1.5.0
+[1.4.0]: https://github.com/mazixs/kamerton/releases/tag/v1.4.0
+[1.3.0]: https://github.com/mazixs/kamerton/releases/tag/v1.3.0
+[1.2.0]: https://github.com/mazixs/kamerton/releases/tag/v1.2.0
+[1.1.1]: https://github.com/mazixs/kamerton/releases/tag/v1.1.1
+[1.1.0]: https://github.com/mazixs/kamerton/releases/tag/v1.1.0
+[1.0.0]: https://github.com/mazixs/kamerton/releases/tag/v1.0.0

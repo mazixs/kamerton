@@ -1,9 +1,15 @@
-from console.catalog import HEADS, LANGS, is_downloaded, openai_model_id, pick
+from console.catalog import HEADS, LANGS, OCTOBER_E2E, is_downloaded, openai_model_id, pick
 
 
-def test_catalog_lists_four_heads_in_ui_order():
-    assert list(HEADS) == ["rnnt", "e2e_rnnt", "ml_ctc", "ml_ctc_large"]
+def test_catalog_lists_model_revisions_in_ui_order():
+    assert list(HEADS) == [
+        "rnnt", "e2e_rnnt", OCTOBER_E2E, "ml_ctc", "ml_ctc_large",
+        "gigaam_v4_rnnt", "gigaam_v4_ctc", "gigaam_multilingual_v2_rnnt",
+        "whisper_tiny", "whisper_small", "whisper_large_v3_turbo", "whisper_large_v3",
+        "parakeet_tdt_v3", "parakeet_ultra", "nemotron_35_asr", "t_one",
+    ]
     assert HEADS["e2e_rnnt"].native_punctuation is True
+    assert HEADS[OCTOBER_E2E].native_punctuation is True
     assert HEADS["rnnt"].native_punctuation is False
     assert "ru" in HEADS["rnnt"].languages
     assert "kk" in HEADS["ml_ctc"].languages
@@ -36,6 +42,10 @@ def test_is_downloaded_unknown_head_is_false(tmp_path):
 def test_openai_model_ids():
     assert openai_model_id("rnnt") == "gigaam-v3-rnnt"
     assert openai_model_id("ml_ctc_large") == "gigaam-multilingual-large-ctc"
+    assert openai_model_id("gigaam_v4_rnnt") == "gigaam-v4-rnnt"
+    assert openai_model_id("gigaam_v4_ctc") == "gigaam-v4-ctc"
+    assert openai_model_id("gigaam_multilingual_v2_rnnt") == "gigaam-multilingual-v2-rnnt"
+    assert len(HEADS["gigaam_multilingual_v2_rnnt"].languages) == 21
 
 
 def test_badges_name_our_own_measurement_not_someone_elses_table():

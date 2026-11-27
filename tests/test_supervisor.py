@@ -28,6 +28,21 @@ async def supervisor(console_settings, bus):
         await sup.shutdown()
 
 
+async def test_standard_build_restores_unavailable_model_without_downloading(console_settings, bus, monkeypatch):
+    console_settings.autostart = True
+    StateFile(console_settings.state_path).save(State(desired=cfg(variant="whisper_tiny")))
+
+    async def unexpected_download(*args):
+        pytest.fail("attempted to download a model without its runtime")
+
+    monkeypatch.setattr("console.supervisor.download", unexpected_download)
+    supervisor = Supervisor(console_settings, bus)
+    await supervisor.restore_on_boot()
+    assert supervisor.status == "error"
+    assert supervisor.detail_code == "deploy.runtime_unavailable"
+    assert supervisor.desired.variant == "whisper_tiny"
+
+
 async def test_deploy_downloads_starts_and_reaches_ready(supervisor, console_settings):
     await supervisor.deploy(cfg())
     assert supervisor.status == "ready"

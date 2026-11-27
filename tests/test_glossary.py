@@ -3,8 +3,29 @@ from console.glossary import (
     parse_context,
     read_glossary,
     render_hotwords,
+    whisper_prompt_fields,
     write_hotwords,
 )
+
+
+def test_whisper_prompt_uses_glossary_phrases_within_budget():
+    fields = [("language", "ru"), ("response_format", "json")]
+    glossary = "Камертон|2, камертон, #комментарий, скрыто|0, " + "я" * 115 + ", большой\tпроект"
+    assert whisper_prompt_fields(fields, glossary) == fields + [
+        ("prompt", "Камертон, большой проект."), ("max_context", "224"),
+    ]
+    assert whisper_prompt_fields(fields, "#комментарий, скрыто|-1") == fields
+
+
+def test_whisper_prompt_keeps_explicit_client_supplied_fields():
+    glossary = "Камертон"
+    assert whisper_prompt_fields([("prompt", "Клиент")], glossary) == [
+        ("prompt", "Клиент"), ("max_context", "224"),
+    ]
+    assert whisper_prompt_fields([("prompt", "")], glossary) == [("prompt", "")]
+    assert whisper_prompt_fields([("max_context", "0")], glossary) == [("max_context", "0")]
+    fields = [("prompt", "Клиент"), ("max_context", "42")]
+    assert whisper_prompt_fields(fields, glossary) == fields
 
 
 def test_splits_on_commas_and_newlines_and_trims():

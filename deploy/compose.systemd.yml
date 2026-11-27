@@ -1,0 +1,8 @@
+# Optional override for a Linux NPM deployment supervised by kamerton-reconcile.timer.
+services:
+  kamerton:
+    restart: "no"
+    logging: !override
+      driver: journald
+      options:
+        tag: kamerton

@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import subprocess
 import sys
 import time
@@ -144,6 +145,8 @@ async def test_cookie_and_key_are_separate(owner):
     assert (await client.get("/api/client-models")).json()["object"] == "list"
     for headers in ({}, {"Origin": ORIGIN}, {**csrf, "Origin": "https://other.test"}):
         assert (await client.post("/api/keys", json={"name": "a"}, headers=headers)).status_code == 403
+    scoped_create = await client.post("/api/keys", json={"name": "a", "model": "kamerton"}, headers=csrf)
+    assert scoped_create.status_code == 400
     created = await client.post("/api/keys", json={"name": "a"}, headers=csrf)
     assert created.status_code == 201 and created.headers["cache-control"] == "no-store"
     key = created.json()["key"]
@@ -159,6 +162,68 @@ async def test_cookie_and_key_are_separate(owner):
         assert (await machine.get("/v1/models")).status_code == 401
     assert (await client.post("/auth/logout", headers=csrf)).status_code == 204
     assert (await client.get("/api/status", headers={"Cookie": cookie.split(";")[0]})).status_code == 401
+
+
+async def test_client_key_revoke_covers_transcription_retry_and_restart(managed):
+    assert cli(managed, "init").returncode == 0
+    app = create_app(managed)
+    files = {"file": ("sample.wav", wav_bytes(), "audio/wav")}
+    transcription = "/v1/audio/transcriptions"
+    async with app.router.lifespan_context(app), http(app) as client, http(app) as machine:
+        csrf = (await login(client)).json()["csrf_token"]
+        headers = {"Origin": ORIGIN, "X-CSRF-Token": csrf}
+        key = (await client.post("/api/keys", json={"name": "phone"}, headers=headers)).json()
+        machine.headers["Authorization"] = "Bearer " + key["key"]
+        await app.state.supervisor.deploy(EngineConfig())
+        before = await machine.post(transcription, files=files, data={"model": "gigaam-v3-rnnt"})
+        assert before.json() == {"text": "привет мир"}
+
+        revoke_path = f"/api/keys/{key['id']}/revoke"
+        store = app.state.owner_store
+        with store.connection(write=True) as db:
+            db.execute("CREATE TRIGGER reject_revoke BEFORE UPDATE OF revoked_at ON client_keys "
+                       "BEGIN SELECT RAISE(ABORT, 'test failed write'); END")
+        assert (await client.post(revoke_path, headers=headers)).status_code == 503
+        assert (await machine.get("/v1/models")).status_code == 200
+        with store.connection(write=True) as db:
+            db.execute("DROP TRIGGER reject_revoke")
+
+        # Multipart может загружаться после успешной проверки ключа на входе.
+        upload_started, send_rest = asyncio.Event(), asyncio.Event()
+        upload = machine.build_request("POST", transcription, files=files)
+
+        async def slow_upload():
+            upload_started.set()
+            await send_rest.wait()
+            async for chunk in upload.stream:
+                yield chunk
+
+        pending = asyncio.create_task(machine.post(
+            transcription, content=slow_upload(), headers={"Content-Type": upload.headers["Content-Type"]},
+        ))
+        try:
+            await asyncio.wait_for(upload_started.wait(), timeout=5)
+            assert (await client.post(revoke_path, headers=headers)).status_code == 204
+            revoked_at = (await client.get("/api/keys")).json()["keys"][0]["revoked_at"]
+            assert revoked_at
+            assert (await client.post(revoke_path, headers=headers)).status_code == 204
+            assert (await client.get("/api/keys")).json()["keys"][0]["revoked_at"] == revoked_at
+        finally:
+            send_rest.set()
+        during = await pending
+        assert during.status_code == 401
+        assert during.json()["error"]["code"] == "invalid_api_key"
+        assert app.state.metrics.snapshot()["count"] == 1
+        assert (await machine.get("/v1/models")).status_code == 401
+
+    restarted = create_app(managed)
+    async with restarted.router.lifespan_context(restarted), http(restarted) as machine:
+        machine.headers["Authorization"] = "Bearer " + key["key"]
+        for response in (await machine.get("/v1/models"),
+                         await machine.post(transcription, files=files),
+                         await machine.post("/v1/audio/translations")):
+            assert response.status_code == 401
+            assert response.json()["error"]["code"] == "invalid_api_key"
 
 
 @pytest.mark.parametrize("update", [
@@ -336,12 +401,14 @@ async def test_two_keys_wav_no_restart_no_secrets_to_engine(owner, monkeypatch):
         async def transcribe(record):
             return await machine.post("/v1/audio/transcriptions", files={"file": ("sample.wav", wav_bytes(), "audio/wav")},
                                       headers={"Authorization": "Bearer " + record["key"], "Cookie": "synthetic=value"})
-        assert (await transcribe(a)).status_code == 200
-        assert (await transcribe(b)).status_code == 200
+        for record in (a, b):
+            result = await transcribe(record)
+            assert result.status_code == 200 and result.headers["X-Kamerton-Cache"] == "MISS"
         assert (await client.post(f"/api/keys/{a['id']}/revoke", headers=csrf)).status_code == 204
         assert (await transcribe(a)).status_code == 401
-        assert (await transcribe(b)).status_code == 200
-    assert supervisor.process.pid == pid and len(sent) == 3
+        repeat = await transcribe(b)
+        assert repeat.status_code == 200 and repeat.headers["X-Kamerton-Cache"] == "HIT"
+    assert supervisor.process.pid == pid and len(sent) == 2
     assert all(not req.url.query and not {"cookie", "authorization", "x-csrf-token"}.intersection(req.headers) for req in sent)
 
 
@@ -397,13 +464,19 @@ async def test_owner_db_requires_explicit_keyed_rollback(owner, managed):
 
 
 async def test_fingerprint_login_and_console(owner):
-    client, _ = owner
+    client, app = owner
     page = await client.get("/login")
     assert page.status_code == 200 and page.headers["cache-control"] == "no-store"
-    assert '/static/login.js?v=' in page.text
+    login_assets = set(re.findall(r'/static/assets/[\w-]+\.(?:js|css)', page.text))
+    assert login_assets and any("/login-" in asset for asset in login_assets)
+    for asset in login_assets:
+        assert (await client.get(asset)).status_code == 200
     await login(client)
     page = await client.get("/")
-    assert '/static/owner.js?v=' in page.text
+    console_script = re.search(r'src="(/static/assets/index-[\w-]+\.js)"', page.text).group(1)
+    assert (await client.get(console_script)).status_code == 200
+    async with http(app) as guest:
+        assert (await guest.get(console_script)).status_code == 401
 
 
 async def test_local_auth_contract(client_stopped):

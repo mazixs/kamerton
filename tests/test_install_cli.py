@@ -15,8 +15,11 @@ SPEC.loader.exec_module(cli)
 
 
 def invoke(root, *args, input=None):
-    return subprocess.run([sys.executable, str(SCRIPT), "--root", str(root), *args],
-                          capture_output=True, text=True, encoding="utf-8", input=input, check=False)
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), "--root", str(root), *args],
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        capture_output=True, encoding="utf-8", input=input, check=False,
+    )
 
 
 @pytest.fixture
@@ -24,6 +27,22 @@ def install(tmp_path):
     shop = cli.Installation(tmp_path / "install")
     shop.initialize("local", "kamerton:test")
     return shop
+
+
+def test_existing_installation_preserves_its_pinned_service_name(install):
+    assert install.services == ["kamerton"]
+
+    template = install.templates / "docker-compose.yml"
+    old_service = cli.LEGACY_APP_SERVICE.encode()
+    template.write_bytes(template.read_bytes().replace(b"  kamerton:", b"  " + old_service + b":"))
+    install.state["templates"][template.name] = cli.fingerprint(template)
+    del install.state["app_service"]
+    install.save()
+
+    reopened = cli.Installation(install.root)
+    reopened.load()
+    reopened.check_files()
+    assert reopened.services == [cli.LEGACY_APP_SERVICE]
 
 
 def test_init_pins_profile_and_never_overwrites_user_env(install):
@@ -110,14 +129,14 @@ def test_template_edit_not_applied(install):
 @pytest.fixture
 def transaction(install, monkeypatch, tmp_path):
     shop = install
-    old = {"services": {"stt-api": {"image": "old", "environment": {"AUTOSTART": "1"}}}}
-    candidate = {"services": {"stt-api": {"image": "candidate", "environment": {"AUTOSTART": "1"}}}}
+    old = {"services": {"kamerton": {"image": "old", "environment": {"AUTOSTART": "1"}}}}
+    candidate = {"services": {"kamerton": {"image": "candidate", "environment": {"AUTOSTART": "1"}}}}
     shop.state.update(active=old, engine="local-test")
     shop.save()
     actions = []
     monkeypatch.setattr(shop, "render", lambda: old)
     monkeypatch.setattr(shop, "matching_model", lambda rendered: old)
-    running = {"stt-api": {"Id": "container", "State": {"Running": True}}}
+    running = {"kamerton": {"Id": "container", "State": {"Running": True}}}
     monkeypatch.setattr(shop, "verify_actual", lambda model, **kw: running)
     monkeypatch.setattr(shop, "owned", lambda: {})
     monkeypatch.setattr(shop, "check_data_users", lambda actual, model: actions.append("check-mount-users"))
@@ -205,7 +224,7 @@ def test_abrupt_exit_after_stop_keeps_old_model_and_can_recover(transaction, mon
 @pytest.mark.parametrize("state", ["downloading", "starting", "ready"])
 def test_backup_refuses_to_stop_transient_or_manually_started_model(transaction, state, monkeypatch):
     shop, old, _, actions = transaction
-    old["services"]["stt-api"]["environment"]["AUTOSTART"] = "0"
+    old["services"]["kamerton"]["environment"]["AUTOSTART"] = "0"
     monkeypatch.setattr(shop, "engine_health", lambda id_: {"engine_status": state, "variant": "rnnt"})
     with pytest.raises(cli.Failure, match="Дождитесь|Остановите модель"):
         shop.transaction("backup")
@@ -246,9 +265,9 @@ def test_refuses_direct_or_nested_foreign_writer_but_not_readonly_admin_mount(in
 
 def test_update_does_not_revert_drifted_mount_publication_or_runtime(install, monkeypatch):
     shop = install
-    model = {"services": {"stt-api": {"image": "pinned", "environment": {}, "ports": ["127.0.0.1:8091:8080"]}}}
+    model = {"services": {"kamerton": {"image": "pinned", "environment": {}, "ports": ["127.0.0.1:8091:8080"]}}}
     shop.state["active"] = shop.model(model, "pinned", None)
     drift = copy.deepcopy(model)
-    drift["services"]["stt-api"]["ports"] = ["127.0.0.1:9999:8080"]
+    drift["services"]["kamerton"]["ports"] = ["127.0.0.1:9999:8080"]
     with pytest.raises(cli.Failure, match="Параметры установки изменены"):
         shop.matching_model(drift)

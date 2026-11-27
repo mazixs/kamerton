@@ -54,8 +54,9 @@ from urllib.parse import urlsplit
 try:
     config = json.load(sys.stdin)
     services = config["services"]
-    assert config["name"] == sys.argv[1] and set(services) == {"stt-api", "owner-cli"}
-    app, owner = services["stt-api"], services["owner-cli"]
+    app_service = "kamerton" if "kamerton" in services else "stt-api"
+    assert config["name"] == sys.argv[1] and set(services) == {app_service, "owner-cli"}
+    app, owner = services[app_service], services["owner-cli"]
     env = app["environment"]
     assert env["OWNER_ACCESS"] == "1" and not env.get("API_KEY")
     assert not {"ADMIN_USERNAME", "ADMIN_PASSWORD", "ADMIN_PASSWORD_FILE"}.intersection(env)
@@ -91,17 +92,17 @@ try:
     assert origin.removeprefix("https://").lower() == authority
     peer = ipaddress.ip_address(env["TRUSTED_PROXY_IP"])
     assert not (peer.is_unspecified or peer.is_multicast) and "%" not in str(peer)
-    values = [str(data), str(models), app["image"], f"{bind}:{published}", origin, str(peer)]
+    values = [str(data), str(models), app["image"], f"{bind}:{published}", origin, str(peer), app_service]
     assert all(value and value.isprintable() for value in values)
 except (AssertionError, KeyError, TypeError, ValueError, StopIteration):
     sys.exit("Проверьте, что выбран самостоятельный профиль NPM и верные mounts/порт.")
 print(*values, sep="\n")
 ' "$project")
 mapfile -t fields <<< "$settings"
-[[ ${#fields[@]} == 6 ]] || fail 'Не удалось сверить настройки NPM.'
-data_dir=${fields[0]} models_dir=${fields[1]} image=${fields[2]}
+[[ ${#fields[@]} == 7 ]] || fail 'Не удалось сверить настройки NPM.'
+data_dir=${fields[0]} models_dir=${fields[1]} image=${fields[2]} app_service=${fields[6]}
 printf 'Docker Engine: %s (%s)\nПроект: %s\nДанные: %s\nМодели: %s\nОбраз: %s\nHTTP: %s\nHTTPS origin: %s\nДоверенный peer: %s\n' \
-  "${engine_id% *}" "$context" "$project" "${fields[@]}"
+  "${engine_id% *}" "$context" "$project" "${fields[@]:0:6}"
 [[ $action != check ]] || exit 0
 
 confirm() {
@@ -111,7 +112,7 @@ confirm() {
 }
 if [[ $action == build ]]; then
   confirm
-  project_compose build stt-api
+  project_compose build "$app_service"
   exit 0
 fi
 

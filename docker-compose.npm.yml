@@ -2,13 +2,13 @@
 name: kamerton-npm
 
 services:
-  stt-api:
+  kamerton:
     build:
       context: ${KAMERTON_BUILD_CONTEXT:-.}
-      target: app
+      target: standard
       args:
         GIGASTT_TAG: ${GIGASTT_TAG:-2.22.0}
-    image: ${KAMERTON_IMAGE:-stt-api-console:npm}
+    image: ${KAMERTON_IMAGE:-kamerton:npm}
     pull_policy: never
     init: true
     stop_grace_period: 45s
@@ -56,7 +56,7 @@ services:
 
   owner-cli:
     profiles: [setup]
-    image: ${KAMERTON_IMAGE:-stt-api-console:npm}
+    image: ${KAMERTON_IMAGE:-kamerton:npm}
     pull_policy: never
     entrypoint: ["python", "-m", "console.owner_cli"]
     command: ["--help"]

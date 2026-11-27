@@ -67,7 +67,7 @@ curl -s localhost:8091/health
 Проверьте, что бинарник движка совместим с базовым образом:
 
 ```sh
-docker compose run --rm --entrypoint /usr/local/bin/gigastt stt-api --version
+docker compose run --rm --entrypoint /usr/local/bin/gigastt kamerton --version
 # gigastt <версия из GIGASTT_TAG в docker-compose.yml>
 ```
 
@@ -99,7 +99,7 @@ watch -n5 "curl -s localhost:8091/api/status | python3 -m json.tool | head -5"
 curl -sLO https://cdn.chatwm.opensmodel.sberdevices.ru/GigaAM/example.wav       # 11.3 с
 curl -sLO https://cdn.chatwm.opensmodel.sberdevices.ru/GigaAM/long_example.wav  # 71.2 с
 
-curl -s localhost:8091/v1/models    # один id: kamerton; variant совпадает с /api/status
+curl -s localhost:8091/v1/models    # ID скачанных моделей и псевдоним kamerton, если движок запущен
 curl -s -X POST localhost:8091/v1/audio/transcriptions -F model=kamerton -F file=@example.wav
 curl -s -X POST localhost:8091/v1/audio/transcriptions -F model=whisper-1 -F file=@example.wav  # совместимость
 curl -s -X POST localhost:8091/api/test -F file=@example.wav
@@ -143,8 +143,8 @@ if not any(bytes((0xB5, 0x80 + size)) + struct.pack(fmt, rate) in header
     sys.exit(f'В заголовке WebM нет SamplingFrequency={rate}')
 PY
   curl -fsS -X POST localhost:8091/api/test -F "file=@speech-$rate.webm"
-  docker compose cp "speech-$rate.webm" "stt-api:/tmp/speech-$rate.webm"
-  docker compose exec stt-api curl -fsS -X POST 127.0.0.1:9876/v1/audio/transcriptions \
+  docker compose cp "speech-$rate.webm" "kamerton:/tmp/speech-$rate.webm"
+  docker compose exec kamerton curl -fsS -X POST 127.0.0.1:9876/v1/audio/transcriptions \
     -F "file=@/tmp/speech-$rate.webm"
 done
 ```
@@ -153,6 +153,22 @@ done
 
 Консоль такие загрузки не переписывает — она только читает их длину, чтобы посчитать
 RTF (`console/webminfo.py`), потому что в ответе формата `json` длительности нет.
+
+### Веб-консоль в Safari
+
+Регрессия контраста мобильного меню запускается в WebKit. Тест измеряет фон
+на снимке самого меню, поскольку браузер может рисовать системный фон поверх
+цвета из CSS. Для меню задана темная цветовая схема. [Документация WebKit](https://webkit.org/blog/8840/dark-mode-support-in-webkit/)
+
+```sh
+uv run --locked --with playwright python -m playwright install webkit
+uv run --locked --with playwright python -m pytest tests/test_ui.py -k mobile_navigation_has_visible_text
+```
+
+В Safari на Mac и iPhone нужно отдельно проверить диктовку с микрофона по HTTPS,
+загрузку WAV, экспорт глоссария и копирование текста. На Mac с включенным IME
+первый Enter должен подтвердить ввод, второй - добавить готовую фразу в глоссарий.
+[Порядок событий IME в WebKit](https://bugs.webkit.org/show_bug.cgi?id=324380)
 
 ## 3.5. Лимит размера
 
@@ -171,7 +187,7 @@ pathlib.Path('limit.wav').write_bytes(h+d)"
 curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8091/v1/audio/transcriptions \
   -F model=kamerton -F file=@limit.wav                       # ожидается 200
 
-docker compose exec stt-api sh -c 'ps -eo args | grep "[g]igastt serve"' \
+docker compose exec kamerton sh -c 'ps -eo args | grep "[g]igastt serve"' \
   | tr ' ' '\n' | grep -A1 body-limit             # ожидается (MB + 1) * 1048576
 ```
 
@@ -188,7 +204,7 @@ wc -l hotwords.bak
 ```sh
 curl -s -X POST localhost:8091/api/glossary \
   -H 'content-type: application/json' -d '{"text":"лукоморье|8, АйМоп"}'
-docker compose exec stt-api cat /data/hotwords.txt
+docker compose exec kamerton cat /data/hotwords.txt
 curl -s localhost:8091/api/status | grep -o '"status":"[a-z]*"'
 ```
 
@@ -206,7 +222,7 @@ curl -s -X POST localhost:8091/api/glossary -H 'content-type: application/json' 
 ## 5. Восстановление после падения движка
 
 ```sh
-docker compose exec stt-api pkill -f 'gigastt serve'
+docker compose exec kamerton pkill -f 'gigastt serve'
 sleep 5
 curl -s localhost:8091/api/status | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['status'], d['restart_count'], d['detail'])"
 curl -s -X POST localhost:8091/api/test -F file=@example.wav
@@ -218,7 +234,7 @@ curl -s -X POST localhost:8091/api/test -F file=@example.wav
 ## 6. Восстановление после перезапуска контейнера
 
 ```sh
-docker compose restart stt-api
+docker compose restart kamerton
 sleep 10
 curl -s localhost:8091/api/status | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['status'], d['engine']['variant'])"
 ```
@@ -235,7 +251,7 @@ curl -s localhost:8091/api/status | python3 -c "import json,sys; d=json.load(sys
 ```sh
 docker compose up -d
 sleep 8
-docker compose logs stt-api | grep ВНИМАНИЕ
+docker compose logs kamerton | grep ВНИМАНИЕ
 curl -s localhost:8091/api/status | python3 -m json.tool | sed -n '/"env"/,/}/p'
 ```
 
@@ -265,7 +281,7 @@ curl -s localhost:8091/api/status | python3 -c "import json,sys; print(json.load
 ## 7. Побочные модели лежат в томе
 
 ```sh
-docker compose exec stt-api ls /models /models/punct
+docker compose exec kamerton ls /models /models/punct
 ```
 
 Ожидается голова (`v3_rnnt_*`), `punct/` с `rupunct_small_int8.onnx`, модель
@@ -294,8 +310,8 @@ unset smoke_key
 головы — см. [решения](decisions.md)):
 
 ```sh
-docker compose exec stt-api gigastt cache-gc --model-dir /models --dry-run
-docker compose exec stt-api gigastt cache-gc --model-dir /models
+docker compose exec kamerton gigastt cache-gc --model-dir /models --dry-run
+docker compose exec kamerton gigastt cache-gc --model-dir /models
 ```
 
 `kept` считает графы для установленных весов, а не головы: на одну голову может
@@ -303,7 +319,7 @@ docker compose exec stt-api gigastt cache-gc --model-dir /models
 `*_optimized.ort` и `*_optimized.onnx`. Проверка, что работающий движок не пострадал:
 
 ```sh
-docker compose exec stt-api grep -o '/models/optimized_cache/[^ ]*' /proc/*/maps
+docker compose exec kamerton grep -o '/models/optimized_cache/[^ ]*' /proc/*/maps
 curl -s -X POST localhost:8091/api/test -F file=@example.wav
 ```
 

@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -64,7 +65,7 @@ def mounts(service):
 def test_npm_standalone(config):
     runtime = config("config", "--services")
     assert runtime.returncode == 0, runtime.stderr
-    assert runtime.stdout.split() == ["stt-api"]
+    assert runtime.stdout.split() == ["kamerton"]
 
     resolved = model(config, variables=REQUIRED | {
         "ADMIN_USERNAME": "not-forwarded", "ADMIN_PASSWORD": "not-forwarded",
@@ -72,8 +73,8 @@ def test_npm_standalone(config):
         "OWNER_ACCESS": "0", "ENGINE_HOST": "0.0.0.0", "HOST_BIND": "0.0.0.0", "HOST_PORT": "80",
     })
     assert resolved["name"] == "kamerton-npm"
-    assert set(resolved["services"]) == {"stt-api", "owner-cli"}
-    app, cli = (resolved["services"][name] for name in ("stt-api", "owner-cli"))
+    assert set(resolved["services"]) == {"kamerton", "owner-cli"}
+    app, cli = (resolved["services"][name] for name in ("kamerton", "owner-cli"))
     assert len(app["ports"]) == 1
     port = app["ports"][0]
     assert (port["host_ip"], str(port["published"]), port["target"], port["protocol"]) == (
@@ -88,9 +89,9 @@ def test_npm_standalone(config):
     assert not set(app["environment"]) & {"API_KEY", "ALLOW_OWNER_LOCAL_ROLLBACK", "ENGINE_HOST"}
     assert not any(name.startswith("ADMIN_") for name in app["environment"])
     assert "env_file" not in app and "env_file" not in cli
-    assert app["build"]["target"] == "app"
+    assert app["build"]["target"] == "standard"
     assert Path(app["build"]["context"]) == ROOT
-    assert app["image"] == cli["image"] == "stt-api-console:npm"
+    assert app["image"] == cli["image"] == "kamerton:npm"
     assert app["pull_policy"] == cli["pull_policy"] == "never"
     assert cli["entrypoint"] == ["python", "-m", "console.owner_cli"]
     assert cli["command"] == ["--help"]
@@ -119,18 +120,18 @@ def test_npm_rejects_missing_boundary_setting(config, field, empty):
 def test_npm_gitops_yaml_only(config, tmp_path):
     manifest = tmp_path / "docker-compose.yml"
     manifest.write_bytes(NPM.read_bytes())
-    context = "https://github.com/mazixs/stt-api.git#v1.6.0"
+    context = "https://github.com/mazixs/kamerton.git#v1.6.0"
     data, models = tmp_path / "previous-data", tmp_path / "previous-models"
     resolved = model(config, manifest=manifest, variables=REQUIRED | {
         "KAMERTON_BUILD_CONTEXT": context,
         "KAMERTON_DATA_DIR": str(data),
         "KAMERTON_MODEL_DIR": str(models),
         "KAMERTON_PORT": "18999",
-        "KAMERTON_IMAGE": "stt-api-console:arcane-example",
+        "KAMERTON_IMAGE": "kamerton:arcane-example",
     })
-    app, cli = (resolved["services"][name] for name in ("stt-api", "owner-cli"))
+    app, cli = (resolved["services"][name] for name in ("kamerton", "owner-cli"))
     assert app["build"]["context"] == context
-    assert app["image"] == cli["image"] == "stt-api-console:arcane-example"
+    assert app["image"] == cli["image"] == "kamerton:arcane-example"
     assert str(app["ports"][0]["published"]) == "18999"
     assert mounts(app) == {"/data": data, "/models": models}
     assert mounts(cli) == {"/data": data}
@@ -140,3 +141,59 @@ def test_npm_gitops_yaml_only(config, tmp_path):
 def test_npm_env_example(config):
     result = config("config", "--quiet", variables={}, dotenv=ROOT / ".env.npm.example")
     assert result.returncode == 0, result.stderr
+
+
+def test_systemd_override_replaces_docker_restart_and_log_rotation(config):
+    result = config("-f", str(ROOT / "deploy/compose.systemd.yml"), "config", "--format", "json")
+    assert result.returncode == 0, result.stderr
+    app = json.loads(result.stdout)["services"]["kamerton"]
+    assert app["restart"] == "no"
+    assert app["logging"] == {"driver": "journald", "options": {"tag": "kamerton"}}
+    assert app["ports"][0]["host_ip"] == REQUIRED["KAMERTON_BIND"]
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+async def test_browser_loads_native_stylesheet_with_public_csp(engine, live_client):
+    pw = pytest.importorskip("playwright.async_api")
+    caddyfile = (ROOT / "Caddyfile").read_text(encoding="utf-8")
+    policy = re.search(r'Content-Security-Policy "([^"]+)"', caddyfile).group(1)
+    login_html = ROOT / "frontend" / "dist" / "login.html"
+
+    async with pw.async_playwright() as driver:
+        if engine == "webkit" and not Path(driver.webkit.executable_path).is_file():
+            pytest.skip("Для проверки CSP в Safari нужен Playwright WebKit")
+        browser = await driver.webkit.launch() if engine == "webkit" else await driver.chromium.launch(channel="chrome")
+        try:
+            page = await browser.new_page()
+            await page.add_init_script("""window.styleViolations = [];
+                document.addEventListener('securitypolicyviolation', event => {
+                    if (event.effectiveDirective.startsWith('style-src')) {
+                        window.styleViolations.push(event.blockedURI);
+                    }
+                });""")
+
+            async def serve_login(route):
+                await route.fulfill(path=login_html, content_type="text/html", headers={
+                    "Content-Security-Policy": policy,
+                })
+
+            async def serve_console(route):
+                response = await route.fetch()
+                await route.fulfill(response=response, headers={
+                    **response.headers, "content-security-policy": policy,
+                })
+
+            origin = str(live_client.base_url).rstrip("/")
+            await page.route(f"{origin}/login", serve_login)
+            await page.route(f"{origin}/", serve_console)
+
+            for path, visible_control in [("/login", "#login-form"), ("/", "#main")]:
+                await page.goto(origin + path)
+                await pw.expect(page.locator(visible_control)).to_be_visible()
+                sheet = page.locator("link#react-native-stylesheet[rel=stylesheet]")
+                href = await sheet.get_attribute("href")
+                assert re.fullmatch(r"/static/assets/react-native-web-[\w-]{8}\.css", href or "")
+                assert await sheet.evaluate("link => link.sheet.cssRules.length > 4")
+                assert await page.evaluate("window.styleViolations") == []
+        finally:
+            await browser.close()

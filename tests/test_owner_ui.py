@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 import pytest
 
 
-STATIC = Path(__file__).resolve().parents[1] / "console" / "static"
+STATIC = Path(__file__).resolve().parents[1] / "frontend" / "dist"
 NOW = "2026-11-19T10:05:03+00:00"
 SECRET = "one-time-browser-test-value"
 
@@ -19,7 +19,7 @@ async def owner_ui(live_client):
     pw = pytest.importorskip("playwright.async_api")
     origin = str(live_client.base_url)
     config = {"authenticated": True, "csrf": "browser-test-csrf", "limit": 1024**2,
-              "rows": [], "requests": [], "errors": [], "fail": {}}
+              "rows": [], "models": [], "requests": [], "errors": [], "fail": {}}
 
     async with pw.async_playwright() as driver:
         browser = await driver.chromium.launch(channel="chrome")
@@ -74,7 +74,7 @@ async def owner_ui(live_client):
                     next(row for row in config["rows"] if row["id"] == path.split("/")[3])["revoked_at"] = NOW
                     return await route.fulfill(status=204)
                 if path == "/api/client-models":
-                    return await route.fulfill(json={"object": "list", "data": []})
+                    return await route.fulfill(json={"object": "list", "data": config["models"]})
                 return await route.continue_()
 
             await page.route("**/*", serve)
@@ -127,8 +127,10 @@ async def test_owner_keys_keyboard_and_copy_in_chrome(owner_ui):
     config["fail"]["/api/keys"] = 503
     await page.goto(origin + "/#api")
     await page.locator("#key-retry").click()
-    await expect(page.locator("#key-list-status")).to_have_text("No keys yet.")
+    await expect(page.locator("#key-list-status")).to_have_text("No active keys.")
+    await page.locator('#railnav a[href="#status"]').click()
     await expect(page.locator("#edit-key")).to_be_disabled()
+    await page.locator('#railnav a[href="#api"]').click()
     await expect(page.locator("#link-docs")).to_have_attribute("href", "/api/docs")
     await page.locator("#service-models summary").click()
     await expect(page.locator("#model-response")).to_contain_text('"data"')
@@ -145,10 +147,10 @@ async def test_owner_keys_keyboard_and_copy_in_chrome(owner_ui):
     await expect(secret).to_have_text(SECRET)
     assert SECRET not in await page.evaluate("JSON.stringify(localStorage) + JSON.stringify(sessionStorage)")
     await expect(page.locator("#base-url")).to_have_value("https://speech.example/v1")
-    for selector, value in [("key-base", origin + "/v1"), ("key-model", "kamerton")]:
-        await expect(page.locator("#" + selector)).to_have_text(value)
-        await page.locator(f'#secret-dialog [data-target="{selector}"]').click()
-        assert await page.evaluate("navigator.clipboard.readText()") == value
+    await expect(page.locator("#key-base")).to_have_text(origin + "/v1")
+    await page.locator('#secret-dialog [data-target="key-base"]').click()
+    assert await page.evaluate("navigator.clipboard.readText()") == origin + "/v1"
+    await expect(page.locator("#secret-dialog").get_by_text("Model ID")).to_have_count(0)
     await page.locator("#key-copy").press("Enter")
     await expect(page.locator("#key-copy-status")).not_to_be_empty()
     assert await page.evaluate("navigator.clipboard.readText()") == SECRET
@@ -166,8 +168,60 @@ async def test_owner_keys_keyboard_and_copy_in_chrome(owner_ui):
     await page.locator("#revoke-confirm").click()
     await expect(page.locator("#revoke-error")).to_contain_text("Try again")
     await page.locator("#revoke-confirm").click()
-    await expect(page.locator("#key-list")).to_contain_text("Revoked:")
-    await expect(revoke).to_have_count(0)
+    await expect(page.locator("#key-notice")).to_have_text("Key revoked.")
+    await expect(page.locator("#key-list")).to_be_empty()
+    await expect(page.locator("#key-list-status")).to_have_text("No active keys.")
+    await page.reload()
+    await expect(page.locator("#key-list-status")).to_have_text("No active keys.")
+    await expect(page.locator("#key-list")).to_be_empty()
+
+
+async def test_api_model_examples_and_agent_prompt_in_chrome(owner_ui):
+    page, expect, config, origin = owner_ui
+    config["models"] = [{"id": "gigaam-v3-rnnt"}, {"id": "kamerton"}]
+    await page.context.grant_permissions(["clipboard-read", "clipboard-write"], origin=origin)
+    await page.goto(origin + "/#api")
+    picker = page.locator("#client-model-picker")
+    models = page.locator("#client-model")
+    await expect(page.get_by_role("heading", name="Our models")).to_be_visible()
+    await expect(models).to_have_text("gigaam-v3-rnnt")
+    await expect(page.locator("#snip-curl")).to_contain_text("model=gigaam-v3-rnnt")
+    await expect(page.locator("#snip-py")).to_contain_text('model="gigaam-v3-rnnt"')
+    await picker.locator("summary").click()
+    await picker.get_by_role("button", name="kamerton (currently deployed model)").click()
+    await expect(picker.locator("ul")).to_be_hidden()
+    await expect(page.locator("#snip-curl")).to_contain_text("model=kamerton")
+    await page.get_by_role("button", name="Copy model ID").click()
+    assert await page.evaluate("navigator.clipboard.readText()") == "kamerton"
+    await page.get_by_role("complementary").get_by_role("radio", name="RU").click()
+    await expect(page.get_by_role("heading", name="Модели нашего сервиса")).to_be_visible()
+    await page.get_by_role("button", name="Скопировать промпт для агента").click()
+    prompt = await page.evaluate("navigator.clipboard.readText()")
+    assert "Base URL: https://speech.example/v1" in prompt
+    assert "Preferred model ID: kamerton" in prompt
+    assert "KAMERTON_API_KEY" in prompt and "error.code and error.message" in prompt
+    assert "POST /audio/transcriptions" in prompt and SECRET not in prompt
+    await page.set_viewport_size({"width": 320, "height": 844})
+    assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
+async def test_revoked_key_disappears_when_refresh_fails_in_chrome(owner_ui):
+    page, expect, config, origin = owner_ui
+    config["rows"] = [
+        {"id": "1", "name": "Phone", "created_at": NOW, "revoked_at": None},
+        {"id": "2", "name": "Laptop", "created_at": NOW, "revoked_at": None},
+        {"id": "3", "name": "Archive", "created_at": NOW, "revoked_at": NOW},
+    ]
+    await page.goto(origin + "/#api")
+    await expect(page.locator("#key-list li")).to_have_count(2)
+    revoke = page.get_by_role("button", name="Revoke key for Phone")
+    await revoke.click()
+    config["fail"]["/api/keys"] = 503
+    await page.locator("#revoke-confirm").click()
+    await expect(page.locator("#key-notice")).to_have_text("Key revoked.")
+    await expect(page.locator("#key-list")).not_to_contain_text("Phone")
+    await expect(page.locator("#key-list")).to_contain_text("Laptop")
+    await expect(page.locator("#key-retry")).to_be_visible()
 
 
 async def test_key_cleanup_and_responsive_locales_in_chrome(owner_ui):
@@ -306,10 +360,20 @@ async def test_rotated_csrf_replays_rejected_write_once(owner_ui):
     assert len(requests_to(config, "/auth/session")) == 3
 
 
-async def test_aborted_csrf_refresh_never_replays(owner_ui):
+async def test_aborted_csrf_refresh_never_replays(owner_ui, live_client, monkeypatch):
+    from conftest import wav_bytes
+
     page, expect, config, origin = owner_ui
-    await page.goto(origin + "/#api")
-    await expect(page.locator("#key-list-status")).to_contain_text("No keys")
+    supervisor = live_client.app.state.supervisor
+    monkeypatch.setattr(type(supervisor), "compare_available", property(lambda _: True))
+    monkeypatch.setattr(supervisor, "_compare_enabled", True)
+    await page.route("**/api/models?*", lambda route: route.fulfill(json={"heads": [
+        {"id": "rnnt", "api_id": "gigaam-v3-rnnt", "runtime": "gigastt", "downloaded": True, "title": "GigaAM RNNT"},
+        {"id": "e2e_rnnt", "api_id": "gigaam-v3-e2e-rnnt", "runtime": "gigastt", "downloaded": True, "title": "GigaAM E2E"},
+    ]}))
+    await page.goto(origin + "/#compare")
+    await page.locator("#compare-file").set_input_files({"name": "sample.wav", "mimeType": "audio/wav", "buffer": wav_bytes()})
+    await expect(page.locator("#btn-compare")).to_be_enabled()
     config["csrf"] = "changed"
     started, release = asyncio.Event(), asyncio.Event()
 
@@ -320,17 +384,14 @@ async def test_aborted_csrf_refresh_never_replays(owner_ui):
 
     await page.route("**/auth/session", delay)
     try:
-        await page.evaluate("""() => {
-            window.controller = new AbortController();
-            window.finished = api('/api/keys', {method:'POST', headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({name:'aborted'}), signal:controller.signal}).catch(e => e.name);
-        }""")
+        await page.locator("#btn-compare").click()
         await asyncio.wait_for(started.wait(), timeout=5)
-        await page.evaluate("controller.abort()")
+        async with page.expect_event("requestfailed", predicate=lambda request: request.url.endswith("/auth/session")):
+            await page.locator('#railnav a[href="#status"]').click()
+            await expect(page.locator("#heading")).to_have_text("Service status")
     finally:
         release.set()
-    assert await page.evaluate("finished") == "AbortError"
-    assert len(requests_to(config, "/api/keys", "POST")) == 1 and not config["rows"]
+    assert len(requests_to(config, "/api/compare", "POST")) == 1
 
 
 async def test_in_flight_create_survives_section_change_only(owner_ui):
@@ -366,8 +427,9 @@ async def test_glossary_checks_encoded_merged_json_and_keeps_draft(owner_ui):
     await page.locator("#glossary-file").set_input_files({"name":"more.txt", "mimeType":"text/plain", "buffer":"ё".encode()})
     await expect(page.locator("#glossary-hint")).to_contain_text(f"{limit} bytes")
     await expect(tags).to_have_text([draft])
-    await page.locator(".rail [data-lang=ru]").click()
+    await page.get_by_role("complementary").get_by_role("radio", name="RU").click()
     await expect(page.locator("#glossary-hint")).to_contain_text(f"{limit} байт")
+    await expect(page.locator('[data-page="glossary"]')).to_be_visible()
     await phrases.fill("ё")
     await phrases.press("Enter")
     await page.locator("#btn-glossary").click()
@@ -386,7 +448,7 @@ async def test_session_error_never_falls_back_to_stored_key(owner_ui):
     await expect(page.locator("#session-retry")).to_be_visible()
     assert not any(urlsplit(url).path.startswith("/api/") for url, _, _ in config["requests"])
     await page.locator("#session-retry").click()
-    await expect(page.locator("#key-list-status")).to_have_text("No keys yet.")
+    await expect(page.locator("#key-list-status")).to_have_text("No active keys.")
     assert await page.evaluate("localStorage.getItem('stt_console_key')") is None
 
 
@@ -412,7 +474,9 @@ async def test_client_dialog_and_large_glossary_layout(owner_ui, width):
         await expect(page.locator(f'[data-page="{section}"]')).to_be_visible()
 
     await page.goto(origin + "/#glossary")
-    await page.locator("#glossary-file").set_input_files({
+    file_picker = page.locator("#glossary-file")
+    await expect(file_picker).to_be_enabled()
+    await file_picker.set_input_files({
         "name": "synthetic.txt", "mimeType": "text/plain", "buffer": "\n".join(phrases).encode()})
     tags = page.locator("#tag-list .tag-text")
     await expect(tags).to_have_count(230)
@@ -434,9 +498,14 @@ async def test_client_dialog_and_large_glossary_layout(owner_ui, width):
         panel = await page.locator('[data-page="glossary"]').bounding_box()
         assert tray["width"] >= panel["width"] * .84
         await navigate("settings")
+        await expect(page.locator("#history-retention")).to_be_enabled()
+        await capture("settings", lang)
+        await navigate("models")
+        await page.locator("#model-settings").click()
         await expect(page.locator("#opt-pool")).to_be_enabled()
         await expect(page.locator("#window-note")).not_to_be_empty()
-        await capture("settings", lang)
+        await capture("startup", lang)
+        await page.locator("#model-dialog-close").click()
         await navigate("api")
         await expect(page.locator("#base-url")).to_have_value("https://speech.example/v1")
         await capture("client", lang)
